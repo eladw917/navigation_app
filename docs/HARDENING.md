@@ -27,13 +27,35 @@ EXPLAIN (ANALYZE, BUFFERS)
 - Outside Israel bounds → 400
 - ORS/Pelias outage → 502 with message (no key leaked)
 
+## Data lifecycle (best practices)
+
+| Asset | Store | Notes |
+|-------|--------|--------|
+| App code | Git | Deploy from `main`; do not edit production by hand long-term |
+| Live GTFS | Postgres (`gtfs_*`, active `gtfs_feed_versions` row) | Runtime source of truth |
+| Import staging | `data/gtfs/work/` (gitignored) | Disposable zip + extracted txts |
+| Secrets | `.env` on the host only | Never commit |
+
+Import defaults:
+
+- Hash the zip **before** extract; identical SHA reactivates without reloading.
+- After success, delete staging under `data/gtfs/work/` (use `--keep-work` to retain).
+- Delete inactive feed versions (CASCADE) so disk does not grow with every MOT refresh (`--keep-versions 1` keeps one rollback).
+
+```bash
+npm run db:import                 # MOT feed → Postgres, clean staging, prune inactive
+npm run db:import -- --keep-work  # debug: leave zip/txts on disk
+npm run db:import -- --keep-versions 1
+```
+
 ## Deployment sketch
 
-1. Managed Postgres with PostGIS
+1. Managed Postgres with PostGIS (or Docker volume on a VPS)
 2. Run migrations on deploy
-3. Periodic GTFS import job (nightly) using transactional feed activation
+3. Periodic GTFS import job (nightly) using transactional feed activation + prune
 4. API service with env secrets; no public ORS key
 5. Notebook remains an operator/analyst tool, not a production UI
+6. Web static build on Cloudflare Pages (or similar); API elsewhere
 
 ## Acceptance
 

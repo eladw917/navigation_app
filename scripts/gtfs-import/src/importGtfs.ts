@@ -16,6 +16,10 @@ export type ImportOptions = {
   zipPath?: string;
   workDir?: string;
   activate?: boolean;
+  /** Keep downloaded zip + extracted txts (default false — Postgres is the store). */
+  keepWork?: boolean;
+  /** Inactive feed versions to retain after activate (default 0). */
+  keepInactiveVersions?: number;
 };
 
 export type Counts = {
@@ -114,13 +118,47 @@ function simplePlaceholders(columnCount: number, startIndex: number): { sql: str
   return { sql: `(${placeholders.join(",")})`, nextIndex: i };
 }
 
+/** Staging files are disposable; the active feed in Postgres is the source of truth. */
+function cleanupStaging(workDir: string, zipPath: string, options: {
+  keepWork: boolean;
+  preserveUserZip: boolean;
+}): void {
+  if (options.keepWork) return;
+  rmSync(path.join(workDir, "extracted"), { recursive: true, force: true });
+  if (!options.preserveUserZip) {
+    rmSync(zipPath, { force: true });
+  }
+}
+
+async function pruneInactiveFeeds(client: pg.Client, keepInactive: number): Promise<number> {
+  const keep = Math.max(0, keepInactive);
+  const result = await client.query(
+    `WITH doomed AS (
+       SELECT id
+       FROM gtfs_feed_versions
+       WHERE active = false
+       ORDER BY imported_at DESC NULLS LAST, id
+       OFFSET $1
+     )
+     DELETE FROM gtfs_feed_versions g
+     USING doomed d
+     WHERE g.id = d.id
+     RETURNING g.id`,
+    [keep],
+  );
+  return result.rowCount ?? 0;
+}
+
 export async function importGtfs(
   options: ImportOptions,
 ): Promise<{ feedVersionId: string; counts: Counts; sha256: string; reused: boolean }> {
   const workDir = options.workDir ?? path.resolve("data/gtfs/work");
   mkdirSync(workDir, { recursive: true });
+  const preserveUserZip = Boolean(options.zipPath);
   const zipPath = options.zipPath ?? path.join(workDir, "feed.zip");
   const extractDir = path.join(workDir, "extracted");
+  const keepWork = options.keepWork === true;
+  const keepInactiveVersions = options.keepInactiveVersions ?? 0;
 
   if (options.zipPath) {
     if (!existsSync(zipPath)) throw new Error(`Zip not found: ${zipPath}`);
@@ -130,9 +168,6 @@ export async function importGtfs(
   }
 
   const sha256 = await sha256File(zipPath);
-  rmSync(extractDir, { recursive: true, force: true });
-  console.log("Extracting zip...");
-  await extractZip(zipPath, extractDir);
 
   const client = new Client({ connectionString: options.databaseUrl });
   await client.connect();
@@ -149,6 +184,9 @@ export async function importGtfs(
         await client.query(`UPDATE gtfs_feed_versions SET active = true WHERE id = $1`, [existing.rows[0].id]);
         await client.query("COMMIT");
       }
+      const pruned = await pruneInactiveFeeds(client, keepInactiveVersions);
+      if (pruned > 0) console.log(`Pruned ${pruned} inactive feed version(s)`);
+      cleanupStaging(workDir, zipPath, { keepWork, preserveUserZip });
       return {
         feedVersionId: existing.rows[0].id,
         sha256,
@@ -156,6 +194,10 @@ export async function importGtfs(
         counts: { stops: 0, routes: 0, trips: 0, stopTimes: 0, agencies: 0, calendar: 0, calendarDates: 0 },
       };
     }
+
+    rmSync(extractDir, { recursive: true, force: true });
+    console.log("Extracting zip...");
+    await extractZip(zipPath, extractDir);
 
     await client.query("BEGIN");
     // Speed up bulk load inside the transaction
@@ -403,7 +445,11 @@ export async function importGtfs(
     await client.query("ANALYZE gtfs_trips");
     await client.query("ANALYZE gtfs_routes");
 
+    const pruned = await pruneInactiveFeeds(client, keepInactiveVersions);
+    if (pruned > 0) console.log(`Pruned ${pruned} inactive feed version(s)`);
+
     console.log(notes);
+    cleanupStaging(workDir, zipPath, { keepWork, preserveUserZip });
     return { feedVersionId, counts, sha256, reused: false };
   } catch (error) {
     try {

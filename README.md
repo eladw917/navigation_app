@@ -43,11 +43,13 @@ cp .env.example .env
 npm install
 npm run db:migrate
 npm run db:import:fixture   # tiny local feed for SQL tests
-# optional full Israel feed (~150MB+):
+# optional full Israel feed (~150MB+ zip; loads into Postgres, staging cleaned after):
 # npm run db:import
 
 npm run dev
 ```
+
+**Data note:** Postgres holds the live GTFS. `data/gtfs/` is gitignored staging only — see [docs/HARDENING.md](./docs/HARDENING.md#data-lifecycle-best-practices).
 
 API:
 - Health: `http://localhost:3010/health`
