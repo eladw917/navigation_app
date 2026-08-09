@@ -2,6 +2,9 @@
 -- $2 int hour_start_secs (inclusive)
 -- $3 int hour_end_secs (exclusive, may be > 86400 for overnight)
 -- $4 int[] days_of_week (0=Sunday .. 6=Saturday); empty = all days
+--
+-- Route-level headways only (station freq is min of known line headways in the API).
+-- DISTINCT deps collapses multi-service duplicate clock times before gap stats.
 WITH active_feed AS (
   SELECT id
   FROM gtfs_feed_versions
@@ -26,7 +29,7 @@ services AS (
      OR (6 = ANY($4) AND c.saturday = 1)
 ),
 deps AS (
-  SELECT
+  SELECT DISTINCT
     st.stop_id,
     COALESCE(NULLIF(r.route_short_name, ''), r.route_id) AS route_short_name,
     COALESCE(st.departure_secs, st.arrival_secs) AS dep_secs
@@ -59,30 +62,12 @@ ordered_route AS (
     ) AS prev_dep
   FROM deps
 ),
-ordered_stop AS (
-  SELECT
-    stop_id,
-    dep_secs,
-    lag(dep_secs) OVER (
-      PARTITION BY stop_id
-      ORDER BY dep_secs
-    ) AS prev_dep
-  FROM deps
-),
 route_gaps AS (
   SELECT
     stop_id,
     route_short_name,
     (dep_secs - prev_dep) AS gap_secs
   FROM ordered_route
-  WHERE prev_dep IS NOT NULL
-    AND (dep_secs - prev_dep) BETWEEN 60 AND 7200
-),
-stop_gaps AS (
-  SELECT
-    stop_id,
-    (dep_secs - prev_dep) AS gap_secs
-  FROM ordered_stop
   WHERE prev_dep IS NOT NULL
     AND (dep_secs - prev_dep) BETWEEN 60 AND 7200
 ),
@@ -95,30 +80,11 @@ route_stats AS (
   FROM route_gaps
   GROUP BY stop_id, route_short_name
 ),
-stop_stats AS (
-  SELECT
-    stop_id,
-    COUNT(*)::int AS sample_count,
-    percentile_cont(0.5) WITHIN GROUP (ORDER BY gap_secs)::float8 AS median_headway_secs
-  FROM stop_gaps
-  GROUP BY stop_id
-),
 route_counts AS (
   SELECT stop_id, route_short_name, COUNT(*)::int AS departure_count
   FROM deps
   GROUP BY stop_id, route_short_name
 )
-SELECT
-  'stop'::text AS kind,
-  s.stop_id,
-  NULL::text AS route_short_name,
-  s.median_headway_secs,
-  s.sample_count,
-  COALESCE((
-    SELECT SUM(rc.departure_count)::int FROM route_counts rc WHERE rc.stop_id = s.stop_id
-  ), 0) AS departure_count
-FROM stop_stats s
-UNION ALL
 SELECT
   'route'::text AS kind,
   r.stop_id,
@@ -130,4 +96,4 @@ FROM route_stats r
 LEFT JOIN route_counts rc
   ON rc.stop_id = r.stop_id
  AND rc.route_short_name = r.route_short_name
-ORDER BY kind, stop_id, route_short_name NULLS FIRST;
+ORDER BY stop_id, route_short_name;
