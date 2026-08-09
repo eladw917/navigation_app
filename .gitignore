@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+coverage/
+.turbo/
+data/gtfs/
+data/downloads/
+*.zip
+.venv/
+notebooks/.ipynb_checkpoints/
+__pycache__/
+.pytest_cache/

@@ -1,0 +1,24 @@
+{
+  "name": "navigation-app",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "scripts/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @navigation/contracts && npm run build -w @navigation/api && npm run build -w @navigation/gtfs-import && npm run build -w @navigation/web",
+    "dev": "npm run dev -w @navigation/api",
+    "dev:web": "npm run dev -w @navigation/web",
+    "dev:all": "npm run dev -w @navigation/api & npm run dev -w @navigation/web",
+    "db:migrate": "npm run migrate -w @navigation/api",
+    "db:import": "npm run import -w @navigation/gtfs-import",
+    "db:import:fixture": "npm run import -w @navigation/gtfs-import -- --fixture",
+    "test": "npm run test -w @navigation/api && npm run test -w @navigation/gtfs-import",
+    "typecheck": "npm run typecheck -w @navigation/contracts && npm run typecheck -w @navigation/api && npm run typecheck -w @navigation/gtfs-import && npm run typecheck -w @navigation/web",
+    "smoke": "bash scripts/smoke.sh"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

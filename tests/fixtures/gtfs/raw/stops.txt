@@ -1,0 +1,6 @@
+stop_id,stop_code,stop_name,stop_desc,stop_lat,stop_lon,location_type,parent_station
+A1,1,Origin Walk Stop,,32.0853,34.7818,0,
+A2,2,Origin Edge Stop,,32.0860,34.7830,0,
+B1,3,Destination Radius Stop,,32.0750,34.7800,0,
+B2,4,Destination Far Stop,,32.0500,34.7500,0,
+C1,5,Alight Isochrone Stop,,32.0800,34.7900,0,

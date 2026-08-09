@@ -1,0 +1,5 @@
+city,mode,walk_min,routes,stops,cached,server_ms,client_s,warnings,notes
+Tel Aviv,walk_transit,10,139,27,False,3538,3.55,ORS isochrone unavailable; used circular walking approximation. Rotate/renew HEIGIT_API_KEY for real network isochrones.,
+Tel Aviv,transit_walk,15,200,32,True,2999,3.01,ORS isochrone unavailable; used circular walking approximation. Rotate/renew HEIGIT_API_KEY for real network isochrones.; Results capped at 200 route/stop pairs,
+Jerusalem,walk_transit,15,200,38,False,6017,6.03,ORS isochrone unavailable; used circular walking approximation. Rotate/renew HEIGIT_API_KEY for real network isochrones.; Results capped at 200 route/stop pairs,
+Haifa,walk_transit,15,200,38,False,5176,5.18,ORS isochrone unavailable; used circular walking approximation. Rotate/renew HEIGIT_API_KEY for real network isochrones.; Results capped at 200 route/stop pairs,

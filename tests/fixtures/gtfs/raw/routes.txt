@@ -1,0 +1,3 @@
+route_id,agency_id,route_short_name,route_long_name,route_type,route_color,route_text_color
+R1,1,5,Dizengoff Line,3,FF0000,FFFFFF
+R2,1,25,Wrong Direction Line,3,0000FF,FFFFFF
