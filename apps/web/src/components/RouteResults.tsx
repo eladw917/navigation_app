@@ -13,7 +13,9 @@ import {
 } from "../formatDeparture";
 import {
   modeLabel,
+  roundedWalkSeconds,
   routeBadgeLabel,
+  routeOptionKey,
   routeTypeLabel,
   totalJourneySeconds,
   walkLegsSeconds,
@@ -45,11 +47,6 @@ function formatTotalMinutes(seconds: number): string {
 
 function lineTitle(route: DirectRoute): string {
   return route.tripHeadsign || route.routeLongName || routeTypeLabel(route.routeType);
-}
-
-function routeOptionKey(route: DirectRoute): string {
-  const mode = route.planMode ?? "walk_transit";
-  return `${mode}-${route.routeId}-${route.boardStopId}-${route.alightStopId}`;
 }
 
 export function RouteResults({
@@ -203,10 +200,7 @@ export function RouteResults({
           // Match walk-leg minute rounding so next-bus skips trips you'd miss on foot.
           const walkToBoardSecs =
             origin && destination
-              ? Math.max(
-                  60,
-                  Math.round(walkLegsSeconds(route, origin, destination).toBoard / 60) * 60,
-                )
+              ? roundedWalkSeconds(walkLegsSeconds(route, origin, destination).toBoard)
               : 0;
           const nextDep =
             active && activeDeparture

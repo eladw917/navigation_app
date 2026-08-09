@@ -48,7 +48,7 @@ export function PlannerPage() {
   const [destination, setDestination] = useState<Endpoint>(null);
   /** Modes visible after planning; both on by default. */
   const [enabledModes, setEnabledModes] = useState<PlanMode[]>([...ALL_MODES]);
-  /** When on, hide options where walk-to-board + walk-after exceeds max walking time. */
+  /** When on, hide options where walk-to-board or walk-after exceeds max walking time. */
   const [limitTotalWalk, setLimitTotalWalk] = useState(true);
   /** Max station headway (min); same tiers as pin sizes. Default all = no filter. */
   const [maxFrequencyMinutes, setMaxFrequencyMinutes] =
