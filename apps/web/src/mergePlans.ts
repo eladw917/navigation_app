@@ -472,18 +472,13 @@ export function applyResultFilters(
     filters.origin &&
     filters.destination
   ) {
-    // Cap each leg (to board and after alight), not the sum. Use the stricter of
-    // raw seconds vs UI-rounded minutes so a card/popup showing "> N min" cannot pass.
+    // "Walks ≤ N min" = total walking (to board + after alight), matching the slider budget.
     const maxSecs = filters.maxWalkingSeconds + 0.5;
     const maxMins = Math.round(filters.maxWalkingSeconds / 60);
     routes = routes.filter((r) => {
       const legs = walkLegsSeconds(r, filters.origin!, filters.destination!);
-      return (
-        legs.toBoard <= maxSecs &&
-        legs.fromAlight <= maxSecs &&
-        walkMinutesDisplayed(legs.toBoard) <= maxMins &&
-        walkMinutesDisplayed(legs.fromAlight) <= maxMins
-      );
+      const total = legs.toBoard + legs.fromAlight;
+      return total <= maxSecs && walkMinutesDisplayed(total) <= maxMins;
     });
   }
 

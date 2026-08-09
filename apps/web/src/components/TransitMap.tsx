@@ -97,6 +97,9 @@ type Props = {
   /** When set, show this departure (schedule picker) if it matches the browsed trip. */
   overrideDeparture?: ScheduledDeparture | null;
   onOpenSchedule?: () => void;
+  /** When set with limitWalk, stepper cannot pick stops beyond this walk budget (seconds). */
+  maxWalkingSeconds?: number | null;
+  limitWalk?: boolean;
 };
 
 type Station = ValidStop & { distanceMeters: number };
@@ -693,6 +696,8 @@ export function TransitMap({
   onSelectStop,
   overrideDeparture = null,
   onOpenSchedule,
+  maxWalkingSeconds = null,
+  limitWalk = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
@@ -773,31 +778,85 @@ export function TransitMap({
 
   /**
    * Get on: trip start → one stop before get-off (never includes get-off).
+   * When walk limit is on, only stops within the remaining walk budget from origin.
    */
   const boardScrollStations = useMemo((): LineStation[] => {
     if (!lineStations.length) return [];
     const alightIdx = chosenAlightId
       ? lineStations.findIndex((s) => s.stopId === chosenAlightId)
       : -1;
-    if (alightIdx > 0) return lineStations.slice(0, alightIdx);
-    if (alightIdx === 0) return lineStations.slice(0, 1);
-    return lineStations;
-  }, [lineStations, chosenAlightId]);
+    let list =
+      alightIdx > 0
+        ? lineStations.slice(0, alightIdx)
+        : alightIdx === 0
+          ? lineStations.slice(0, 1)
+          : lineStations;
+    if (limitWalk && maxWalkingSeconds != null && origin && isValidLngLat(origin)) {
+      const alightWalk =
+        chosenAlightId && destination && isValidLngLat(destination)
+          ? (() => {
+              const a = lineStations.find((s) => s.stopId === chosenAlightId);
+              return a
+                ? haversineMeters({ lng: a.lng, lat: a.lat }, destination) / WALK_SPEED_MPS
+                : 0;
+            })()
+          : 0;
+      const budget = Math.max(0, maxWalkingSeconds - alightWalk);
+      list = list.filter(
+        (s) => haversineMeters(origin, { lng: s.lng, lat: s.lat }) / WALK_SPEED_MPS <= budget + 0.5,
+      );
+    }
+    return list;
+  }, [
+    lineStations,
+    chosenAlightId,
+    limitWalk,
+    maxWalkingSeconds,
+    origin,
+    destination,
+  ]);
 
   /**
    * Get off: one stop after get-on → trip end (never includes get-on).
+   * When walk limit is on, only stops within the remaining walk budget to destination.
    */
   const alightScrollStations = useMemo((): LineStation[] => {
     if (!lineStations.length) return [];
     const boardIdx = chosenBoardId
       ? lineStations.findIndex((s) => s.stopId === chosenBoardId)
       : -1;
-    if (boardIdx >= 0 && boardIdx < lineStations.length - 1) {
-      return lineStations.slice(boardIdx + 1);
+    let list =
+      boardIdx >= 0 && boardIdx < lineStations.length - 1
+        ? lineStations.slice(boardIdx + 1)
+        : boardIdx === lineStations.length - 1
+          ? lineStations.slice(boardIdx)
+          : lineStations;
+    if (limitWalk && maxWalkingSeconds != null && destination && isValidLngLat(destination)) {
+      const boardWalk =
+        chosenBoardId && origin && isValidLngLat(origin)
+          ? (() => {
+              const b = lineStations.find((s) => s.stopId === chosenBoardId);
+              return b
+                ? haversineMeters(origin, { lng: b.lng, lat: b.lat }) / WALK_SPEED_MPS
+                : 0;
+            })()
+          : 0;
+      const budget = Math.max(0, maxWalkingSeconds - boardWalk);
+      list = list.filter(
+        (s) =>
+          haversineMeters({ lng: s.lng, lat: s.lat }, destination) / WALK_SPEED_MPS <=
+          budget + 0.5,
+      );
     }
-    if (boardIdx === lineStations.length - 1) return lineStations.slice(boardIdx);
-    return lineStations;
-  }, [lineStations, chosenBoardId]);
+    return list;
+  }, [
+    lineStations,
+    chosenBoardId,
+    limitWalk,
+    maxWalkingSeconds,
+    origin,
+    destination,
+  ]);
 
   const scrollStations = useMemo((): LineStation[] => {
     if (!browse?.bus) return [];

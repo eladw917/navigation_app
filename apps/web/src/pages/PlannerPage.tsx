@@ -468,7 +468,7 @@ export function PlannerPage() {
           className={`mode-total${limitTotalWalk ? " active" : ""}`}
           aria-pressed={limitTotalWalk}
           onClick={toggleTotalWalkLimit}
-          title="Hide options where walk to the stop or walk after exceeds max walking time"
+          title="Hide options where walk to the stop plus walk after exceeds max walking time"
         >
           Walks ≤ {committedMinutes} min
         </button>
@@ -671,6 +671,8 @@ export function PlannerPage() {
           selectedRoute={isAdjusting ? mapSelectedRoute : null}
           planning={loading && !isAdjusting}
           overrideDeparture={activeDeparture}
+          limitWalk={limitTotalWalk}
+          maxWalkingSeconds={committedMinutes * 60}
           onOpenSchedule={
             isAdjusting && selectedRoute
               ? () => setScheduleExpanded(true)
