@@ -1,0 +1,8 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm install && npm run build -w @navigation/contracts && npm run build -w @navigation/web",
+  "outputDirectory": "apps/web/dist",
+  "installCommand": "npm install",
+  "framework": null,
+  "rewrites": [{ "source": "/((?!assets/).*)", "destination": "/index.html" }]
+}

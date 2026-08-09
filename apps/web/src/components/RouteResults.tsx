@@ -11,7 +11,13 @@ import {
   formatStopClock,
   pickNextCatchableDeparture,
 } from "../formatDeparture";
-import { modeLabel, totalJourneySeconds, walkLegsSeconds } from "../mergePlans";
+import {
+  modeLabel,
+  routeBadgeLabel,
+  routeTypeLabel,
+  totalJourneySeconds,
+  walkLegsSeconds,
+} from "../mergePlans";
 
 type Props = {
   routes: DirectRoute[];
@@ -37,8 +43,8 @@ function formatTotalMinutes(seconds: number): string {
   return `~${minutes} min`;
 }
 
-function busTitle(route: DirectRoute): string {
-  return route.tripHeadsign || route.routeLongName || "Bus line";
+function lineTitle(route: DirectRoute): string {
+  return route.tripHeadsign || route.routeLongName || routeTypeLabel(route.routeType);
 }
 
 function routeOptionKey(route: DirectRoute): string {
@@ -76,12 +82,19 @@ export function RouteResults({
   }
 
   const selectedDepartures = selectedId ? departuresByKey[selectedId] : undefined;
-  const busName = selectedDepartures?.routeShortName;
+  const selectedRoute = selectedId
+    ? routes.find((r) => routeOptionKey(r) === selectedId) ?? null
+    : null;
+  const scheduleTitle = selectedRoute
+    ? `${routeTypeLabel(selectedRoute.routeType)} ${routeBadgeLabel(selectedRoute)}`
+    : selectedDepartures?.routeShortName
+      ? `Line ${selectedDepartures.routeShortName}`
+      : "Schedule";
 
   return (
     <div className="results-panel">
       <div className="results-header">
-        <h2>{routes.length} bus options</h2>
+        <h2>{routes.length} options</h2>
         {selectedId ? (
           <button type="button" className="linkish" onClick={() => onSelect(null)}>
             Clear selection
@@ -94,7 +107,7 @@ export function RouteResults({
           <div className="schedule-expander-header">
             <div>
               <h3>
-                {busName ? `Bus ${busName}` : "Schedule"}
+                {scheduleTitle}
                 <span className="muted tiny"> · next 24h</span>
               </h3>
               <p className="muted tiny">
@@ -215,8 +228,11 @@ export function RouteResults({
                 onClick={() => onSelect(active ? null : route)}
               >
                 <div className="route-top">
-                  <span className="route-badge">{route.routeShortName ?? route.routeId}</span>
-                  <span className="route-name">{busTitle(route)}</span>
+                  <span className="route-badge">{routeBadgeLabel(route)}</span>
+                  <span className="route-name">
+                    <span className="route-type-tag">{routeTypeLabel(route.routeType)}</span>
+                    {lineTitle(route)}
+                  </span>
                   {total != null ? (
                     <span className="route-total">{formatTotalMinutes(total)}</span>
                   ) : null}
@@ -229,7 +245,13 @@ export function RouteResults({
                 </p>
                 <p className="route-next">
                   <span>
-                    Next bus <strong>{nextLabel ?? "—"}</strong>
+                    Next{" "}
+                    {route.routeType === 2
+                      ? "train"
+                      : route.routeType === 0
+                        ? "light rail"
+                        : "bus"}{" "}
+                    <strong>{nextLabel ?? "—"}</strong>
                   </span>
                   {active && onOpenSchedule ? (
                     <button

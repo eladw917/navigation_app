@@ -412,8 +412,23 @@ input[type="range"] {
   font-weight: 600;
   min-width: 0;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.route-name > :not(.route-type-tag) {
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.route-type-tag {
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
 
 .route-meta {

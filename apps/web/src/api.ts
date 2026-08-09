@@ -38,8 +38,10 @@ export type DirectRoute = {
   routeId: string;
   routeShortName: string | null;
   routeLongName: string | null;
-  directionId: number | null;
-  tripHeadsign: string | null;
+  /** GTFS route_type (Israel: 0 light rail, 2 train, 3 bus). */
+  routeType?: number;
+  directionId?: number | null;
+  tripHeadsign?: string | null;
   tripId: string;
   boardStopId: string;
   boardStopName: string;

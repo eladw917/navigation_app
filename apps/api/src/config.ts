@@ -18,7 +18,7 @@ const EnvSchema = z.object({
   MAX_WALKING_SECONDS: z.coerce.number().default(1800),
   ENDPOINT_RADIUS_METERS: z.coerce.number().default(500),
   PLAN_RESULT_LIMIT: z.coerce.number().default(200),
-  ALLOWED_ROUTE_TYPES: z.string().default("3"),
+  ALLOWED_ROUTE_TYPES: z.string().default("0,2,3"),
 });
 
 const parsed = EnvSchema.safeParse(process.env);

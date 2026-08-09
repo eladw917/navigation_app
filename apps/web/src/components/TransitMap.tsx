@@ -196,7 +196,20 @@ function stopTimeSecs(stop: {
 }
 
 function routeBusName(route: DirectRoute): string {
-  return route.routeShortName ?? route.routeId;
+  // Include route_type so bus "1" and light rail "1" do not collide.
+  const type = route.routeType ?? 3;
+  const name = route.routeShortName?.trim() || route.routeId;
+  return `${type}:${name}`;
+}
+
+function routeChipLabel(busKey: string): string {
+  const idx = busKey.indexOf(":");
+  if (idx < 0) return busKey;
+  const type = Number(busKey.slice(0, idx));
+  const name = busKey.slice(idx + 1);
+  if (type === 2) return name || "Train";
+  if (type === 0) return name ? `LR ${name}` : "Light rail";
+  return name || busKey;
 }
 
 function buildBusStations(stops: ValidStop[], origin: LatLng | null): Map<string, Station[]> {
@@ -2008,7 +2021,7 @@ export function TransitMap({
                     .join(" ")}
                   onClick={() => selectBus(bus)}
                 >
-                  {bus}
+                  {routeChipLabel(bus)}
                 </button>
               );
             })}

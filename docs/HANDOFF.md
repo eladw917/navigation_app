@@ -157,7 +157,7 @@ See `.env.example`. Important knobs:
 
 - `HEIGIT_API_KEY`, ORS/Pelias URLs  
 - `DATABASE_URL`  
-- `PORT` (3010), `PLAN_RESULT_LIMIT` (default 200), `MAX_WALKING_SECONDS`, `ENDPOINT_RADIUS_METERS`, `ALLOWED_ROUTE_TYPES` (default `3` = bus)  
+- `PORT` (3010), `PLAN_RESULT_LIMIT` (default 200), `MAX_WALKING_SECONDS`, `ENDPOINT_RADIUS_METERS`, `ALLOWED_ROUTE_TYPES` (default `0,2,3` = light rail, train, bus — Israel MOT GTFS types)  
 - Web: Vite proxies `/v1` → API; optional `VITE_API_BASE_URL`
 
 ---
@@ -178,11 +178,12 @@ Work landed in this conversation arc (web-heavy):
 
 ## Suggested next steps
 
-- [ ] Confirm RTL labels after a full page reload (not only HMR).  
-- [ ] If plan feels slow: cache plans by O/D/walk/mode, or fetch departures only for visible/selected cards.  
-- [ ] Optional: when user picks a schedule time, keep map get-on clocks on that trip (path already loads via `activeDeparture` in `PlannerPage`).  
-- [ ] Web tests for `formatDeparture.pickNextCatchableDeparture` and scroll-list bounds.  
-- [ ] App-level `dir="rtl"` / Hebrew UI if product wants full RTL chrome.  
+- [ ] Ship free SaaS demo: follow [FREE_SAAS_MVP.md](./FREE_SAAS_MVP.md) (Neon + Render + Pages, fixture GTFS).
+- [ ] Confirm RTL labels after a full page reload (not only HMR).
+- [ ] If plan feels slow: cache plans by O/D/walk/mode, or fetch departures only for visible/selected cards.
+- [ ] Optional: when user picks a schedule time, keep map get-on clocks on that trip (path already loads via `activeDeparture` in `PlannerPage`).
+- [ ] Web tests for `formatDeparture.pickNextCatchableDeparture` and scroll-list bounds.
+- [ ] App-level `dir="rtl"` / Hebrew UI if product wants full RTL chrome.
 - [ ] See `docs/HARDENING.md` before any pilot load.
 
 ---

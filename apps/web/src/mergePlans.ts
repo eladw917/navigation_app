@@ -265,9 +265,44 @@ export function stationPassesMaxFrequency(
 }
 
 /**
- * Keep one option per bus line: the lowest total journey time.
+ * Keep one option per transit line: the lowest total journey time.
+ * Key includes GTFS route_type so bus "1" and light rail "1" stay separate.
  * Collapses mode duplicates (Walk→Transit vs Transit→Walk) and nearby variants.
  */
+export function lineDedupeKey(route: Pick<DirectRoute, "routeShortName" | "routeId" | "routeType">): string {
+  const type = route.routeType ?? 3;
+  const name = route.routeShortName?.trim() || route.routeId;
+  return `${type}:${name}`;
+}
+
+export function routeTypeLabel(routeType: number | null | undefined): string {
+  switch (routeType) {
+    case 0:
+      return "Light rail";
+    case 2:
+      return "Train";
+    case 3:
+      return "Bus";
+    case 5:
+      return "Cable / funicular";
+    case 6:
+      return "Aerial lift";
+    case 7:
+      return "Funicular";
+    case 8:
+      return "Share taxi";
+    default:
+      return "Transit";
+  }
+}
+
+export function routeBadgeLabel(route: Pick<DirectRoute, "routeShortName" | "routeId" | "routeType">): string {
+  const name = route.routeShortName?.trim();
+  if (route.routeType === 2) return name || "Train";
+  if (route.routeType === 0) return name ? `LR ${name}` : "Light rail";
+  return name || route.routeId;
+}
+
 export function dedupeRoutesByBus(
   routes: DirectRoute[],
   origin: { lng: number; lat: number },
@@ -275,16 +310,16 @@ export function dedupeRoutesByBus(
 ): DirectRoute[] {
   const best = new Map<string, DirectRoute>();
   for (const route of routes) {
-    const bus = route.routeShortName ?? route.routeId;
-    const prev = best.get(bus);
+    const key = lineDedupeKey(route);
+    const prev = best.get(key);
     if (!prev) {
-      best.set(bus, route);
+      best.set(key, route);
       continue;
     }
     const nextTotal = totalJourneySeconds(route, origin, destination);
     const prevTotal = totalJourneySeconds(prev, origin, destination);
     if (nextTotal < prevTotal - 0.5) {
-      best.set(bus, route);
+      best.set(key, route);
       continue;
     }
     if (Math.abs(nextTotal - prevTotal) <= 0.5) {
@@ -292,7 +327,7 @@ export function dedupeRoutesByBus(
       const nextMode = route.planMode ?? "walk_transit";
       const prevMode = prev.planMode ?? "walk_transit";
       if (nextMode === "walk_transit" && prevMode !== "walk_transit") {
-        best.set(bus, route);
+        best.set(key, route);
       }
     }
   }

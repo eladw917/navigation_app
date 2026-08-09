@@ -54,10 +54,12 @@ connections AS (
   WHERE COALESCE(st1.pickup_type, 0) <> 1
     AND COALESCE(st2.drop_off_type, 0) <> 1
 )
+SELECT * FROM (
 SELECT DISTINCT ON (r.route_id, c.board_stop_id, c.alight_stop_id)
   r.route_id,
   r.route_short_name,
   r.route_long_name,
+  r.route_type,
   t.direction_id,
   t.trip_headsign,
   c.trip_id,
@@ -97,4 +99,16 @@ ORDER BY
   c.alight_stop_id,
   (c.alight_secs - c.board_secs) ASC NULLS LAST,
   c.trip_id
+) AS options
+ORDER BY
+  -- Prefer light rail / train before buses so PLAN_RESULT_LIMIT does not drown them out.
+  CASE route_type
+    WHEN 0 THEN 0
+    WHEN 2 THEN 1
+    ELSE 2
+  END,
+  ride_duration_seconds ASC NULLS LAST,
+  route_id,
+  board_stop_id,
+  alight_stop_id
 LIMIT $7;

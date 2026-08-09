@@ -76,6 +76,8 @@ export const DirectRouteSchema = z.object({
   routeId: z.string(),
   routeShortName: z.string().nullable(),
   routeLongName: z.string().nullable(),
+  /** GTFS route_type (Israel: 0 light rail, 2 train, 3 bus). */
+  routeType: z.number().int().nonnegative().optional(),
   directionId: z.number().nullable(),
   tripHeadsign: z.string().nullable(),
   tripId: z.string(),

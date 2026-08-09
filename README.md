@@ -67,6 +67,13 @@ The Vite dev server proxies `/v1` and `/health` to the API on **port 3010**
 
 For current UI behavior, recent changes, and where to continue work, see **[docs/HANDOFF.md](docs/HANDOFF.md)**.
 
+### Free SaaS MVP (public demo)
+
+Use **Neon + Render + Cloudflare Pages** with the **fixture** GTFS only (free DB storage cannot hold the full Israel feed).
+
+Step-by-step: **[docs/FREE_SAAS_MVP.md](docs/FREE_SAAS_MVP.md)**  
+Configs: `render.yaml`, `vercel.json`, `apps/web/public/_redirects`.
+
 ## Notebook
 
 ```bash

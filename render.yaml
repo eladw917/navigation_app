@@ -1,0 +1,32 @@
+# Render Blueprint — free API for SaaS MVP
+# https://render.com/docs/blueprint-spec
+#
+# Usage: Render Dashboard → New → Blueprint → connect this repo.
+# Set DATABASE_URL (and optional HEIGIT_*) in the dashboard after create.
+# Load fixture GTFS into Neon from your laptop first (see docs/FREE_SAAS_MVP.md).
+
+services:
+  - type: web
+    name: navigation-api
+    runtime: node
+    plan: free
+    region: frankfurt
+    branch: main
+    healthCheckPath: /health
+    buildCommand: npm install && npm run build -w @navigation/contracts && npm run build -w @navigation/api
+    startCommand: npm run start -w @navigation/api
+    envVars:
+      - key: HOST
+        value: "0.0.0.0"
+      - key: LOG_LEVEL
+        value: info
+      - key: NODE_VERSION
+        value: "20"
+      - key: DATABASE_URL
+        sync: false
+      - key: HEIGIT_API_KEY
+        sync: false
+      - key: HEIGIT_ORS_BASE_URL
+        value: https://api.heigit.org/openrouteservice
+      - key: HEIGIT_PELIAS_BASE_URL
+        value: https://api.heigit.org/pelias/v1

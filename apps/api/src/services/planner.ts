@@ -28,6 +28,7 @@ type RouteRow = {
   route_id: string;
   route_short_name: string | null;
   route_long_name: string | null;
+  route_type: number;
   direction_id: number | null;
   trip_headsign: string | null;
   trip_id: string;
@@ -240,12 +241,14 @@ export async function planDirect(request: DirectPlanRequest, signal?: AbortSigna
   const activeRouteNames = new Set(validStops.flatMap((s) => s.routeShortNames));
 
   let routes: DirectRoute[] = routesResult.rows.map((row) => {
-    const shortName = row.route_short_name ?? row.route_id;
-    const freq = routeHeadway.get(row.board_stop_id)?.get(shortName);
+    const shortName = row.route_short_name?.trim() || null;
+    const displayName = shortName ?? row.route_id;
+    const freq = routeHeadway.get(row.board_stop_id)?.get(displayName);
     return {
       routeId: row.route_id,
-      routeShortName: row.route_short_name,
+      routeShortName: shortName,
       routeLongName: row.route_long_name,
+      routeType: Number(row.route_type),
       directionId: row.direction_id,
       tripHeadsign: row.trip_headsign,
       tripId: row.trip_id,
