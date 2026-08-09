@@ -65,9 +65,8 @@ export function departureWaitSeconds(
 }
 
 /**
- * Max wait for a line to stay in the results list.
- * Planner returns any direct GTFS connection; without this, daytime-only lines
- * appear at night with "Next bus in 16h…".
+ * Max wait used by the optional "Next ≤ 3h" results filter.
+ * Planner still returns all direct connections; the UI filter is opt-in.
  */
 export const MAX_NEXT_DEPARTURE_WAIT_SECONDS = 3 * 3600;
 

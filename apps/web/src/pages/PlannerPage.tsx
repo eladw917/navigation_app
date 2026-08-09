@@ -50,6 +50,8 @@ export function PlannerPage() {
   const [enabledModes, setEnabledModes] = useState<PlanMode[]>([...ALL_MODES]);
   /** When on, hide options where walk-to-board or walk-after exceeds max walking time. */
   const [limitTotalWalk, setLimitTotalWalk] = useState(true);
+  /** When on, hide options with no catchable departure within ~3 hours. Off by default. */
+  const [limitSoonDepartures, setLimitSoonDepartures] = useState(false);
   /** Max station headway (min); same tiers as pin sizes. Default all = no filter. */
   const [maxFrequencyMinutes, setMaxFrequencyMinutes] =
     useState<FrequencyMaxMinutes>("all");
@@ -125,10 +127,10 @@ export function PlannerPage() {
     !basePlan?.routes.length ||
     (!departuresLoading && departuresFetchedSig === routeKeysSig);
 
-  /** After departures load, drop options with no catchable departure soon. */
+  /** Optional: after departures load, keep only options with a catchable departure soon. */
   const plan = useMemo(() => {
     if (!basePlan) return null;
-    if (!departuresReady) return basePlan;
+    if (!limitSoonDepartures || !departuresReady) return basePlan;
     return filterPlanByCatchableDepartures(
       basePlan,
       departuresByKey,
@@ -137,6 +139,7 @@ export function PlannerPage() {
     );
   }, [
     basePlan,
+    limitSoonDepartures,
     departuresReady,
     departuresByKey,
     origin?.location,
@@ -397,6 +400,7 @@ export function PlannerPage() {
       setPlansByMode(next);
       setEnabledModes([...ALL_MODES]);
       setLimitTotalWalk(true);
+      setLimitSoonDepartures(false);
       setMaxFrequencyMinutes("all");
       setMaxTotalTimeMinutes(90);
     } catch (err) {
@@ -433,6 +437,7 @@ export function PlannerPage() {
     setLoading(false);
     setEnabledModes([...ALL_MODES]);
     setLimitTotalWalk(true);
+    setLimitSoonDepartures(false);
     setMaxFrequencyMinutes("all");
     setMaxTotalTimeMinutes(90);
     setSchedule(DEFAULT_SCHEDULE);
@@ -466,6 +471,16 @@ export function PlannerPage() {
           title="Hide options where walk to the stop or walk after exceeds max walking time"
         >
           Walks ≤ {committedMinutes} min
+        </button>
+        <button
+          type="button"
+          className={`mode-total${limitSoonDepartures ? " active" : ""}`}
+          aria-pressed={limitSoonDepartures}
+          disabled={!departuresReady && Boolean(basePlan?.routes.length)}
+          onClick={() => setLimitSoonDepartures((v) => !v)}
+          title="Hide options with no catchable departure within about 3 hours"
+        >
+          Next ≤ 3h
         </button>
       </div>
       <div className="freq-row freq-row-wide" role="group" aria-label="Max station frequency">
