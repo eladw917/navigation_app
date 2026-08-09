@@ -153,32 +153,41 @@ export async function planDirect(request: DirectPlanRequest, signal?: AbortSigna
 
   const stopIds = stopsResult.rows.map((row) => row.stop_id);
   let scheduleRows: ScheduleRow[] = [];
-  // Frequency stats scan gtfs_stop_times (~3.5GB). Limit to board/alight ends of
-  // returned routes (plus a small sample of other reachable stops) and bound runtime
-  // so a plan cannot hang for minutes while the UI looks frozen.
-  const routeStopIds = [
-    ...new Set(
-      routesResult.rows.flatMap((r) => [r.board_stop_id, r.alight_stop_id]),
-    ),
-  ];
-  const extraStopIds = stopIds.filter((id) => !routeStopIds.includes(id)).slice(0, 40);
-  const scheduleStopIds = [...routeStopIds, ...extraStopIds];
-  if (scheduleStopIds.length) {
-    const client = await pool.connect();
-    try {
-      await client.query("SET LOCAL statement_timeout = '8000ms'");
-      const scheduleResult = await client.query<ScheduleRow>(scheduleSql, [
-        scheduleStopIds,
-        schedule.startSecs,
-        schedule.endSecs,
-        schedule.daysOfWeek,
-      ]);
-      scheduleRows = scheduleResult.rows;
-    } catch (err) {
-      warnings.push("Could not compute stop frequencies from GTFS times");
-      console.error("[scheduleStats]", err);
-    } finally {
-      client.release();
+  // Frequency stats scan gtfs_stop_times (~3.5GB). Skip unless the user enabled
+  // schedule filtering — otherwise Plan trip hangs for minutes on full Israel GTFS.
+  // When needed, bound runtime so a timeout cannot freeze the whole plan.
+  if (request.filterBySchedule && stopIds.length) {
+    const routeStopIds = [
+      ...new Set(
+        routesResult.rows.flatMap((r) => [r.board_stop_id, r.alight_stop_id]),
+      ),
+    ];
+    const extraStopIds = stopIds.filter((id) => !routeStopIds.includes(id)).slice(0, 40);
+    const scheduleStopIds = [...routeStopIds, ...extraStopIds];
+    if (scheduleStopIds.length) {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("SET LOCAL statement_timeout = '8000ms'");
+        const scheduleResult = await client.query<ScheduleRow>(scheduleSql, [
+          scheduleStopIds,
+          schedule.startSecs,
+          schedule.endSecs,
+          schedule.daysOfWeek,
+        ]);
+        await client.query("COMMIT");
+        scheduleRows = scheduleResult.rows;
+      } catch (err) {
+        try {
+          await client.query("ROLLBACK");
+        } catch {
+          // ignore
+        }
+        warnings.push("Could not compute stop frequencies from GTFS times");
+        console.error("[scheduleStats]", err);
+      } finally {
+        client.release();
+      }
     }
   }
 
