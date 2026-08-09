@@ -85,12 +85,14 @@ export async function getBoardDepartures(input: {
 }): Promise<StopDeparturesResponse> {
   const { dayOfWeek, nowSecs } = israelLocalNow();
   const tomorrowDow = (dayOfWeek + 1) % 7;
+  // UI may send `3:5` (route_type:short_name); GTFS match uses plain short name.
+  const shortName = input.routeShortName.replace(/^\d+:/, "").trim() || input.routeShortName;
   const sql = await loadSql("boardDepartures.sql");
   const result = await pool.query<DepRow>(sql, [
     input.stopId,
     input.alightStopId,
     input.routeId ?? "",
-    input.routeShortName,
+    shortName,
     dayOfWeek,
     tomorrowDow,
   ]);

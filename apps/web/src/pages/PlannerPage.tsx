@@ -18,23 +18,23 @@ import { ScheduleFilters, type ScheduleFilter } from "../components/ScheduleFilt
 import { TransitMap } from "../components/TransitMap";
 import {
   applyResultFilters,
+  filterPlanByCatchableDepartures,
   filterPlanByModes,
   FREQUENCY_MAX_OPTIONS,
   modeLabel,
+  roundedWalkSeconds,
+  routeOptionKey,
   TOTAL_TIME_MAX_OPTIONS,
+  walkLegsSeconds,
   type FrequencyMaxMinutes,
   type TotalTimeMaxMinutes,
 } from "../mergePlans";
+import { pickNextCatchableDeparture } from "../formatDeparture";
 import { rememberPlace } from "../placeHistory";
 
 type Endpoint = { label: string; location: LatLng } | null;
 
 const ALL_MODES: PlanMode[] = ["walk_transit", "transit_walk"];
-
-function routeOptionKey(route: DirectRoute): string {
-  const mode = route.planMode ?? "walk_transit";
-  return `${mode}-${route.routeId}-${route.boardStopId}-${route.alightStopId}`;
-}
 
 const DEFAULT_SCHEDULE: ScheduleFilter = {
   hoursStart: 6,
@@ -67,6 +67,8 @@ export function PlannerPage() {
     Record<string, StopDeparturesResponse>
   >({});
   const [departuresLoading, setDeparturesLoading] = useState(false);
+  /** Sig of basePlan routes that the current departuresByKey was fetched for. */
+  const [departuresFetchedSig, setDeparturesFetchedSig] = useState("");
   const [scheduleExpanded, setScheduleExpanded] = useState(false);
   const [activeDeparture, setActiveDeparture] = useState<ScheduledDeparture | null>(null);
   const [instancePath, setInstancePath] = useState<TripPathResponse | null>(null);
@@ -77,6 +79,8 @@ export function PlannerPage() {
   const abortRef = useRef<AbortController | null>(null);
   const departuresAbortRef = useRef<AbortController | null>(null);
   const instanceAbortRef = useRef<AbortController | null>(null);
+  /** When true, do not auto-replace activeDeparture with next catchable. */
+  const userPickedDepartureRef = useRef(false);
 
   const canPlan = Boolean(origin && destination);
 
@@ -88,7 +92,8 @@ export function PlannerPage() {
 
   const isAdjusting = Boolean(fullPlan);
 
-  const plan = useMemo(
+  /** Walk / mode / time filters — departures are fetched for these routes. */
+  const basePlan = useMemo(
     () =>
       applyResultFilters(fullPlan, {
         enabledModes,
@@ -110,6 +115,33 @@ export function PlannerPage() {
       maxTotalTimeMinutes,
     ],
   );
+
+  const routeKeysSig = useMemo(
+    () => (basePlan?.routes ?? []).map(routeOptionKey).join("|"),
+    [basePlan?.routes],
+  );
+
+  const departuresReady =
+    !basePlan?.routes.length ||
+    (!departuresLoading && departuresFetchedSig === routeKeysSig);
+
+  /** After departures load, drop options with no catchable departure soon. */
+  const plan = useMemo(() => {
+    if (!basePlan) return null;
+    if (!departuresReady) return basePlan;
+    return filterPlanByCatchableDepartures(
+      basePlan,
+      departuresByKey,
+      origin?.location ?? null,
+      destination?.location ?? null,
+    );
+  }, [
+    basePlan,
+    departuresReady,
+    departuresByKey,
+    origin?.location,
+    destination?.location,
+  ]);
 
   useEffect(() => {
     fetchHealth()
@@ -133,11 +165,6 @@ export function PlannerPage() {
 
   const showModeOnCards = enabledModes.length > 1 && Boolean(plan);
 
-  const routeKeysSig = useMemo(
-    () => (plan?.routes ?? []).map(routeOptionKey).join("|"),
-    [plan?.routes],
-  );
-
   const selectedDepartures = selectedKey ? departuresByKey[selectedKey] ?? null : null;
 
   useEffect(() => {
@@ -157,15 +184,17 @@ export function PlannerPage() {
     departuresAbortRef.current?.abort();
     setActiveDeparture(null);
     setInstancePath(null);
-    if (!plan?.routes.length) {
+    if (!basePlan?.routes.length) {
       setDeparturesByKey({});
       setDeparturesLoading(false);
+      setDeparturesFetchedSig("");
       return;
     }
     const controller = new AbortController();
     departuresAbortRef.current = controller;
     setDeparturesLoading(true);
-    const routes = plan.routes;
+    const routes = basePlan.routes;
+    const fetchSig = routes.map(routeOptionKey).join("|");
     void Promise.all(
       routes.map(async (route) => {
         const key = routeOptionKey(route);
@@ -196,9 +225,40 @@ export function PlannerPage() {
       }
       setDeparturesByKey(next);
       setDeparturesLoading(false);
+      setDeparturesFetchedSig(fetchSig);
     });
     return () => controller.abort();
-  }, [plan?.requestId, routeKeysSig]);
+  }, [basePlan?.requestId, routeKeysSig]);
+
+  /** Default the selected option to the next catchable trip so get-on clocks match "Next bus". */
+  useEffect(() => {
+    if (!selectedRoute || !selectedKey || !departuresReady) return;
+    if (userPickedDepartureRef.current) return;
+    const deps = departuresByKey[selectedKey];
+    if (!deps) {
+      setActiveDeparture(null);
+      return;
+    }
+    const originLoc = origin?.location ?? null;
+    const destLoc = destination?.location ?? null;
+    const walkToBoardSecs =
+      originLoc && destLoc
+        ? roundedWalkSeconds(walkLegsSeconds(selectedRoute, originLoc, destLoc).toBoard)
+        : 0;
+    const next = pickNextCatchableDeparture(
+      deps.departures,
+      deps.nowSecs,
+      walkToBoardSecs,
+    );
+    setActiveDeparture(next);
+  }, [
+    selectedRoute,
+    selectedKey,
+    departuresReady,
+    departuresByKey,
+    origin?.location,
+    destination?.location,
+  ]);
 
   useEffect(() => {
     instanceAbortRef.current?.abort();
@@ -239,6 +299,7 @@ export function PlannerPage() {
   }, [selectedRoute, activeDeparture]);
 
   function handleSelectRoute(route: DirectRoute | null) {
+    userPickedDepartureRef.current = false;
     setActiveDeparture(null);
     setInstancePath(null);
     if (!route) setScheduleExpanded(false);
@@ -246,18 +307,24 @@ export function PlannerPage() {
   }
 
   function handleSelectDeparture(dep: ScheduledDeparture) {
-    setActiveDeparture((prev) =>
-      prev &&
-      prev.tripId === dep.tripId &&
-      prev.departureSecs === dep.departureSecs &&
-      prev.dayOffset === dep.dayOffset
-        ? null
-        : dep,
-    );
+    setActiveDeparture((prev) => {
+      if (
+        prev &&
+        prev.tripId === dep.tripId &&
+        prev.departureSecs === dep.departureSecs &&
+        prev.dayOffset === dep.dayOffset
+      ) {
+        userPickedDepartureRef.current = false;
+        return null;
+      }
+      userPickedDepartureRef.current = true;
+      return dep;
+    });
   }
 
   function handleCollapseSchedule() {
     setScheduleExpanded(false);
+    userPickedDepartureRef.current = false;
     setActiveDeparture(null);
     setInstancePath(null);
   }

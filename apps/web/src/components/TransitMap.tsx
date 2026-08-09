@@ -202,6 +202,28 @@ function routeBusName(route: DirectRoute): string {
   return `${type}:${name}`;
 }
 
+/** Strip `3:5` → `5` for API calls that expect GTFS route_short_name. */
+function busShortName(busKey: string): string {
+  const idx = busKey.indexOf(":");
+  if (idx < 0) return busKey;
+  const type = busKey.slice(0, idx);
+  if (/^\d+$/.test(type)) return busKey.slice(idx + 1);
+  return busKey;
+}
+
+function routeMatchesBus(route: DirectRoute, bus: string): boolean {
+  if (routeBusName(route) === bus) return true;
+  const short = busShortName(bus);
+  const routeName = route.routeShortName?.trim() || route.routeId;
+  if (routeName !== short && routeName !== bus) return false;
+  const typed = bus.match(/^(\d+):/);
+  if (typed) {
+    const type = Number(typed[1]);
+    if (route.routeType != null && route.routeType !== type) return false;
+  }
+  return true;
+}
+
 function routeChipLabel(busKey: string): string {
   const idx = busKey.indexOf(":");
   if (idx < 0) return busKey;
@@ -403,7 +425,9 @@ function pinFreqBucket(
 ): FrequencyBucket | "unknown" {
   // Size from relevant plan buses only (unknown line freqs ignored).
   const lines = buses.map((bus) => {
-    const atStop = stop.routeFrequencies?.find((r) => r.routeShortName === bus);
+    const atStop = stop.routeFrequencies?.find(
+      (r) => r.routeShortName === bus || r.routeShortName === busShortName(bus),
+    );
     let headwaySeconds = atStop?.headwaySeconds ?? null;
     if (headwaySeconds == null || headwaySeconds <= 0) {
       const route = routes.find((r) => {
@@ -429,7 +453,7 @@ function pickRouteForBus(
   destination: LatLng | null,
   origin: LatLng | null = null,
 ): DirectRoute | null {
-  let matches = routes.filter((r) => routeBusName(r) === bus);
+  let matches = routes.filter((r) => routeMatchesBus(r, bus));
   if (!matches.length) return null;
 
   if (preferredStopId) {
@@ -640,17 +664,23 @@ function headwayForBus(
   stopMeta: Map<string, ValidStop>,
   preferredStopId: string | null,
 ): number | null {
-  const atCurrent = currentStation?.routeFrequencies?.find((r) => r.routeShortName === bus);
+  const atCurrent = currentStation?.routeFrequencies?.find(
+    (r) => r.routeShortName === bus || r.routeShortName === busShortName(bus),
+  );
   if (atCurrent) return atCurrent.headwaySeconds ?? null;
   const atFocus = stopMeta
     .get(preferredStopId ?? "")
-    ?.routeFrequencies?.find((r) => r.routeShortName === bus);
+    ?.routeFrequencies?.find(
+      (r) => r.routeShortName === bus || r.routeShortName === busShortName(bus),
+    );
   if (atFocus) return atFocus.headwaySeconds ?? null;
   for (const stop of plan.validStops) {
-    const freq = stop.routeFrequencies?.find((r) => r.routeShortName === bus);
+    const freq = stop.routeFrequencies?.find(
+      (r) => r.routeShortName === bus || r.routeShortName === busShortName(bus),
+    );
     if (freq) return freq.headwaySeconds ?? null;
   }
-  const route = plan.routes.find((r) => routeBusName(r) === bus);
+  const route = plan.routes.find((r) => routeMatchesBus(r, bus));
   return route?.headwaySeconds ?? null;
 }
 
@@ -967,9 +997,8 @@ export function TransitMap({
 
   const browseMatchesSelectedRoute = useMemo(() => {
     if (!browse?.bus || !selectedRoute || !effectiveBoard || !effectiveAlight) return false;
-    const bus = selectedRoute.routeShortName ?? selectedRoute.routeId;
     return (
-      bus === browse.bus &&
+      routeMatchesBus(selectedRoute, browse.bus) &&
       selectedRoute.boardStopId === effectiveBoard.stopId &&
       selectedRoute.alightStopId === effectiveAlight.stopId
     );
@@ -985,20 +1014,21 @@ export function TransitMap({
     const controller = new AbortController();
     depsAbortRef.current = controller;
     setPopupDeparturesLoading(true);
+    const busKey = browse.bus;
     const routeId =
       plan?.routes.find(
         (r) =>
-          (r.routeShortName ?? r.routeId) === browse.bus &&
+          routeMatchesBus(r, busKey) &&
           r.boardStopId === effectiveBoard.stopId &&
           r.alightStopId === effectiveAlight.stopId,
       )?.routeId ??
-      plan?.routes.find((r) => (r.routeShortName ?? r.routeId) === browse.bus)?.routeId ??
+      plan?.routes.find((r) => routeMatchesBus(r, busKey))?.routeId ??
       null;
     void fetchBoardDepartures(
       {
         stopId: effectiveBoard.stopId,
         alightStopId: effectiveAlight.stopId,
-        routeShortName: browse.bus,
+        routeShortName: busShortName(busKey),
         routeId,
       },
       controller.signal,
@@ -1050,6 +1080,47 @@ export function TransitMap({
     activePopupDeparture,
     popupDepartures,
     popupDeparturesLoading,
+  ]);
+
+  // Align timed path with "Next bus" — planner sample tripId is only for connectivity.
+  const nextInstanceTripId = activePopupDeparture?.tripId ?? null;
+  const nextInstanceBoardId = effectiveBoard?.stopId ?? null;
+  const nextInstanceAlightId = effectiveAlight?.stopId ?? null;
+  useEffect(() => {
+    if (!browse?.bus || !nextInstanceTripId || !nextInstanceBoardId || !nextInstanceAlightId) {
+      return;
+    }
+    if (tripPath?.tripId === nextInstanceTripId) return;
+
+    const controller = new AbortController();
+    pathAbortRef.current?.abort();
+    pathAbortRef.current = controller;
+    setPathLoading(true);
+    setPathError(null);
+    void fetchTripPath(
+      nextInstanceTripId,
+      nextInstanceBoardId,
+      nextInstanceAlightId,
+      controller.signal,
+    )
+      .then((path) => {
+        if (controller.signal.aborted) return;
+        setTripPath(path);
+        setPathLoading(false);
+      })
+      .catch((err) => {
+        if ((err as Error).name === "AbortError") return;
+        console.warn("[trip-path] next-departure instance failed", err);
+        if (!controller.signal.aborted) setPathLoading(false);
+      });
+
+    return () => controller.abort();
+  }, [
+    browse?.bus,
+    nextInstanceTripId,
+    nextInstanceBoardId,
+    nextInstanceAlightId,
+    tripPath?.tripId,
   ]);
 
   const stationCount = scrollStations.length;
@@ -1171,6 +1242,7 @@ export function TransitMap({
         console.info("[trip-path] resolve", { bus, preferredStopId, mode: routeMode });
         path = await resolveTripPath(
           {
+            // Keep typed key (`3:5`) so API can disambiguate bus vs light rail.
             routeShortName: bus,
             stopId: preferredStopId,
             mode: routeMode,

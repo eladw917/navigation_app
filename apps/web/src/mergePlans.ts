@@ -3,8 +3,13 @@ import type {
   DirectRoute,
   PlanMode,
   RouteFrequency,
+  StopDeparturesResponse,
   ValidStop,
 } from "./api";
+import {
+  isNextDepartureSoon,
+  pickNextCatchableDeparture,
+} from "./formatDeparture";
 import { headwayToBucket, stationHeadwayFromLines } from "./frequency";
 
 function mergeRoles(
@@ -218,6 +223,21 @@ export function walkLegsSeconds(
   return { toBoard, fromAlight, total: toBoard + fromAlight };
 }
 
+/** Displayed walk minutes — matches RouteResults / TransitMap rounding. */
+export function walkMinutesDisplayed(seconds: number): number {
+  return Math.max(1, Math.round(seconds / 60));
+}
+
+/** Walk seconds after the same minute rounding used for next-bus catchability. */
+export function roundedWalkSeconds(seconds: number): number {
+  return walkMinutesDisplayed(seconds) * 60;
+}
+
+export function routeOptionKey(route: DirectRoute): string {
+  const mode = route.planMode ?? "walk_transit";
+  return `${mode}-${route.routeId}-${route.boardStopId}-${route.alightStopId}`;
+}
+
 /** @deprecated prefer walkLegsSeconds — kept for call sites that only need the sum. */
 export function totalWalkSeconds(
   route: DirectRoute,
@@ -396,7 +416,10 @@ function upsertStop(byId: Map<string, ValidStop>, stop: ValidStop) {
 function stopsFromRoutes(routes: DirectRoute[]): ValidStop[] {
   const byId = new Map<string, ValidStop>();
   for (const route of routes) {
-    const bus = route.routeShortName ?? route.routeId;
+    // Match TransitMap routeBusName so chips / resolve use the same keys.
+    const type = route.routeType ?? 3;
+    const plain = route.routeShortName?.trim() || route.routeId;
+    const bus = `${type}:${plain}`;
     const modes = route.planMode ? [route.planMode] : [];
     const lineFreq: RouteFrequency = {
       routeShortName: bus,
@@ -449,11 +472,14 @@ export function applyResultFilters(
     filters.origin &&
     filters.destination
   ) {
-    const max = filters.maxWalkingSeconds + 0.5;
+    // Compare displayed minutes so a leg shown as > max is excluded.
+    const maxMins = filters.maxWalkingSeconds / 60;
     routes = routes.filter((r) => {
       const legs = walkLegsSeconds(r, filters.origin!, filters.destination!);
-      // Cap each leg (walk to stop and walk after), not only the sum.
-      return legs.toBoard <= max && legs.fromAlight <= max;
+      return (
+        walkMinutesDisplayed(legs.toBoard) <= maxMins &&
+        walkMinutesDisplayed(legs.fromAlight) <= maxMins
+      );
     });
   }
 
@@ -514,6 +540,51 @@ export function applyResultFilters(
     isochrone: { type: "FeatureCollection", features },
     meta: {
       ...fullPlan.meta,
+      routeCount: routes.length,
+      validStopCount: validStops.length,
+    },
+  };
+}
+
+/**
+ * Drop routes with no catchable departure soon enough to be a real plan-now option.
+ * Call only after board departures have loaded; rebuilds validStops from survivors.
+ */
+export function filterPlanByCatchableDepartures(
+  plan: DirectPlanResponse | null,
+  departuresByKey: Record<string, StopDeparturesResponse>,
+  origin: { lng: number; lat: number } | null,
+  destination: { lng: number; lat: number } | null,
+): DirectPlanResponse | null {
+  if (!plan) return null;
+
+  const routes = plan.routes.filter((route) => {
+    const key = routeOptionKey(route);
+    const deps = departuresByKey[key];
+    if (!deps?.departures?.length) return false;
+    const walkToBoardSecs =
+      origin && destination
+        ? roundedWalkSeconds(walkLegsSeconds(route, origin, destination).toBoard)
+        : 0;
+    const next = pickNextCatchableDeparture(
+      deps.departures,
+      deps.nowSecs,
+      walkToBoardSecs,
+    );
+    return isNextDepartureSoon(next, deps.nowSecs);
+  });
+
+  const byId = new Map<string, ValidStop>();
+  for (const stop of stopsFromRoutes(routes)) upsertStop(byId, stop);
+  const validStops = [...byId.values()];
+
+  return {
+    ...plan,
+    requestId: plan.requestId,
+    routes,
+    validStops,
+    meta: {
+      ...plan.meta,
       routeCount: routes.length,
       validStopCount: validStops.length,
     },

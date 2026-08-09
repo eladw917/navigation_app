@@ -105,6 +105,18 @@ export async function getTripPath(
   };
 }
 
+/** UI may send `3:5` (route_type:short_name) after bus/rail dedupe; GTFS stores plain `5`. */
+export function parseRouteLineKey(raw: string): {
+  shortName: string;
+  routeType: number | null;
+} {
+  const m = raw.trim().match(/^(\d+):(.+)$/);
+  if (m) {
+    return { routeType: Number(m[1]), shortName: m[2]!.trim() };
+  }
+  return { routeType: null, shortName: raw.trim() };
+}
+
 export async function resolveTripPath(input: {
   routeShortName: string;
   stopId: string;
@@ -112,20 +124,25 @@ export async function resolveTripPath(input: {
   endpointLng: number;
   endpointLat: number;
 }): Promise<TripPathResponse> {
+  const { shortName, routeType } = parseRouteLineKey(input.routeShortName);
+  const routeTypes =
+    routeType != null && Number.isFinite(routeType)
+      ? [routeType]
+      : env.allowedRouteTypes;
   const sql = await loadSql("resolveTrip.sql");
   const result = await pool.query<ResolveRow>(sql, [
-    input.routeShortName,
+    shortName,
     input.stopId,
     input.endpointLng,
     input.endpointLat,
     env.ENDPOINT_RADIUS_METERS,
     input.mode,
-    env.allowedRouteTypes,
+    routeTypes,
   ]);
   const row = result.rows[0];
   if (!row) {
     const err = new Error(
-      `No direct trip found for bus ${input.routeShortName} at this stop`,
+      `No direct trip found for bus ${shortName} at this stop`,
     ) as Error & { statusCode?: number };
     err.statusCode = 404;
     throw err;
