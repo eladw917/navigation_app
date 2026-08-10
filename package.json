@@ -15,7 +15,7 @@
     "db:import": "npm run import -w @navigation/gtfs-import",
     "db:import:fixture": "npm run import -w @navigation/gtfs-import -- --fixture",
     "test": "npm run test -w @navigation/api && npm run test -w @navigation/gtfs-import",
-    "typecheck": "npm run typecheck -w @navigation/contracts && npm run typecheck -w @navigation/api && npm run typecheck -w @navigation/gtfs-import && npm run typecheck -w @navigation/web",
+    "typecheck": "npm run build -w @navigation/contracts && npm run typecheck -w @navigation/contracts && npm run typecheck -w @navigation/api && npm run typecheck -w @navigation/gtfs-import && npm run typecheck -w @navigation/web",
     "smoke": "bash scripts/smoke.sh"
   },
   "engines": {

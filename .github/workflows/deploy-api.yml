@@ -50,6 +50,9 @@ jobs:
       - name: Install
         run: npm ci
 
+      - name: Build contracts
+        run: npm run build -w @navigation/contracts
+
       - name: Typecheck
         run: npm run typecheck
 
