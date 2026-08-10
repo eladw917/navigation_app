@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# Immutable release deploy for the Navigation API on the Contabo VPS.
+# Usage: navigation-deploy <40-char-git-sha>
+set -euo pipefail
+
+ROOT="/home/ubuntu/navigation-api"
+REPO_URL="${NAVIGATION_REPO_URL:-https://github.com/eladw917/navigation_app.git}"
+KEEP_RELEASES="${NAVIGATION_KEEP_RELEASES:-3}"
+HEALTH_URL="${NAVIGATION_HEALTH_URL:-http://127.0.0.1:3010}"
+SERVICE_NAME="${NAVIGATION_SERVICE_NAME:-navigation-api.service}"
+LOCK_FILE="/tmp/navigation-api-deploy.lock"
+MIRROR="${ROOT}/repo.git"
+
+SHA="${1:-}"
+if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "usage: navigation-deploy <40-char-git-sha>" >&2
+  exit 2
+fi
+
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  echo "another deploy is already running" >&2
+  exit 1
+fi
+
+mkdir -p "$ROOT/releases" "$ROOT/shared" "$ROOT/bin"
+cd "$ROOT"
+
+if [[ ! -d "$MIRROR" ]]; then
+  git clone --mirror "$REPO_URL" "$MIRROR"
+else
+  git -C "$MIRROR" remote set-url origin "$REPO_URL"
+  git -C "$MIRROR" fetch --prune origin
+fi
+
+# Only deploy SHAs that are ancestors of origin/main (or equal to it).
+if ! git -C "$MIRROR" rev-parse --verify "origin/main^{commit}" >/dev/null 2>&1; then
+  echo "origin/main missing from mirror" >&2
+  exit 1
+fi
+if ! git -C "$MIRROR" merge-base --is-ancestor "$SHA" "origin/main"; then
+  echo "refusing deploy: $SHA is not on origin/main" >&2
+  exit 1
+fi
+
+RELEASE_DIR="$ROOT/releases/$SHA"
+PREVIOUS_LINK=""
+if [[ -L "$ROOT/current" ]]; then
+  PREVIOUS_LINK="$(readlink -f "$ROOT/current" || true)"
+fi
+
+if [[ -d "$RELEASE_DIR" ]]; then
+  echo "release $SHA already exists; rebuilding in place"
+  rm -rf "$RELEASE_DIR"
+fi
+
+mkdir -p "$RELEASE_DIR"
+git -C "$MIRROR" archive --format=tar "$SHA" | tar -x -C "$RELEASE_DIR"
+ln -sfn "$ROOT/shared/.env" "$RELEASE_DIR/.env"
+
+echo "installing dependencies for $SHA"
+(
+  cd "$RELEASE_DIR"
+  # Keep devDependencies: migrate uses tsx.
+  npm ci
+  npm run build -w @navigation/contracts
+  npm run build -w @navigation/api
+)
+
+echo "running migrations"
+(
+  cd "$RELEASE_DIR"
+  set -a
+  # shellcheck disable=SC1091
+  source "$ROOT/shared/.env"
+  set +a
+  npm run db:migrate
+)
+
+echo "switching current -> $SHA"
+ln -sfn "$RELEASE_DIR" "$ROOT/current"
+sudo systemctl restart "$SERVICE_NAME"
+
+HEALTH_SCRIPT="$ROOT/bin/health-check.sh"
+if [[ ! -x "$HEALTH_SCRIPT" ]]; then
+  HEALTH_SCRIPT="$(dirname "$0")/health-check.sh"
+fi
+
+if ! "$HEALTH_SCRIPT" "$HEALTH_URL" 45; then
+  echo "health check failed; rolling back application release" >&2
+  if [[ -n "$PREVIOUS_LINK" && -d "$PREVIOUS_LINK" ]]; then
+    ln -sfn "$PREVIOUS_LINK" "$ROOT/current"
+    sudo systemctl restart "$SERVICE_NAME"
+    "$HEALTH_SCRIPT" "$HEALTH_URL" 45 || true
+  fi
+  exit 1
+fi
+
+echo "deployed $SHA"
+printf '%s\n' "$SHA" >"$ROOT/shared/DEPLOYED_SHA"
+
+# Prune old releases (keep newest KEEP_RELEASES by mtime).
+mapfile -t ALL_RELEASES < <(ls -1dt "$ROOT/releases"/*/ 2>/dev/null || true)
+COUNT=0
+for dir in "${ALL_RELEASES[@]}"; do
+  COUNT=$((COUNT + 1))
+  if (( COUNT > KEEP_RELEASES )); then
+    # Never delete the active release.
+    if [[ "$(readlink -f "$ROOT/current")" == "$(readlink -f "$dir")" ]]; then
+      continue
+    fi
+    echo "pruning old release $(basename "$dir")"
+    rm -rf "$dir"
+  fi
+done

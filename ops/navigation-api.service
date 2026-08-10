@@ -1,0 +1,18 @@
+[Unit]
+Description=Navigation App API
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/navigation-api/current
+EnvironmentFile=/home/ubuntu/navigation-api/shared/.env
+ExecStart=/usr/bin/node apps/api/dist/index.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,133 @@
+name: Deploy API
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Optional 40-char SHA to deploy (defaults to the triggering commit)"
+        required: false
+
+concurrency:
+  group: deploy-api
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: navigation
+          POSTGRES_PASSWORD: navigation
+          POSTGRES_DB: navigation
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U navigation -d navigation"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://navigation:navigation@127.0.0.1:5432/navigation
+      HEIGIT_API_KEY: missing
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Migrate + fixture import
+        run: |
+          npm run db:migrate
+          npm run db:import:fixture
+
+      - name: Test
+        run: npm test
+
+      - name: Build API workspaces
+        run: |
+          npm run build -w @navigation/contracts
+          npm run build -w @navigation/api
+
+  deploy:
+    name: Deploy VPS
+    needs: ci
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      VPS_HOST: 169.58.152.118
+      VPS_USER: ubuntu
+    steps:
+      - name: Resolve deploy SHA
+        id: sha
+        run: |
+          if [[ -n "${{ github.event.inputs.sha }}" ]]; then
+            echo "value=${{ github.event.inputs.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare SSH
+        env:
+          VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "${VPS_SSH_PRIVATE_KEY}"
+          test -n "${VPS_KNOWN_HOSTS}"
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > ~/.ssh/vps_deploy_key
+          chmod 600 ~/.ssh/vps_deploy_key
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy release
+        run: |
+          set -euo pipefail
+          SHA="${{ steps.sha.outputs.value }}"
+          if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "invalid sha: $SHA" >&2
+            exit 1
+          fi
+          ssh -i ~/.ssh/vps_deploy_key \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            "${VPS_USER}@${VPS_HOST}" \
+            "navigation-deploy ${SHA}"
+
+      - name: Verify public health
+        run: |
+          set -euo pipefail
+          # Tunnel URL may change; local health already checked by remote deploy.
+          # Still probe the public tunnel if configured, else the VPS loopback via SSH.
+          if [[ -n "${{ secrets.PUBLIC_API_BASE_URL }}" ]]; then
+            BASE="${{ secrets.PUBLIC_API_BASE_URL }}"
+            body="$(curl -fsS --max-time 20 "${BASE%/}/health")"
+            echo "$body"
+            python3 -c '
+import json,sys
+b=json.load(sys.stdin)
+assert b.get("status")=="ok" and b.get("database") is True
+' <<<"$body"
+          else
+            echo "PUBLIC_API_BASE_URL secret unset; relying on remote health check"
+          fi

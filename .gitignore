@@ -14,3 +14,4 @@ data/downloads/
 notebooks/.ipynb_checkpoints/
 __pycache__/
 .pytest_cache/
+.deploy-secrets/

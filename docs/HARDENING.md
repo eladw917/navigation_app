@@ -48,14 +48,20 @@ npm run db:import -- --keep-work  # debug: leave zip/txts on disk
 npm run db:import -- --keep-versions 1
 ```
 
-## Deployment sketch
+## Deployment
+
+Production Contabo API uses **immutable releases** with CI-gated GitHub Actions deploys and health-check rollback. Cloudflare Pages continues to publish the web app from the same `main` push.
+
+See **[DEPLOYMENT.md](./DEPLOYMENT.md)** for layout, secrets, bootstrap, and rollback limits.
+
+Sketch:
 
 1. Managed Postgres with PostGIS (or Docker volume on a VPS)
-2. Run migrations on deploy
-3. Periodic GTFS import job (nightly) using transactional feed activation + prune
-4. API service with env secrets; no public ORS key
+2. Run migrations on every API deploy (`navigation-deploy`)
+3. Periodic GTFS import job (nightly) using transactional feed activation + prune — **not** part of code deploy
+4. API service with env secrets in `/home/ubuntu/navigation-api/shared/.env`; no public ORS key
 5. Notebook remains an operator/analyst tool, not a production UI
-6. Web static build on Cloudflare Pages (or similar); API elsewhere
+6. Web static build on Cloudflare Pages
 
 ## Acceptance
 
