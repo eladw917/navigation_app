@@ -4,6 +4,7 @@ import {
   fetchHealth,
   fetchTripPath,
   planDirect,
+  reversePlace,
   type DirectPlanResponse,
   type DirectRoute,
   type LatLng,
@@ -12,10 +13,13 @@ import {
   type StopDeparturesResponse,
   type TripPathResponse,
 } from "../api";
+import { FilterBar } from "../components/FilterBar";
 import { PlaceInput } from "../components/PlaceInput";
 import { RouteResults } from "../components/RouteResults";
 import { ScheduleFilters, type ScheduleFilter } from "../components/ScheduleFilters";
 import { TransitMap } from "../components/TransitMap";
+import { Icon } from "../components/ui/Icon";
+import { SelectChip } from "../components/ui/SelectChip";
 import {
   applyResultFilters,
   filterPlanByCatchableDepartures,
@@ -23,7 +27,9 @@ import {
   FREQUENCY_MAX_OPTIONS,
   modeLabel,
   roundedWalkSeconds,
+  routeBadgeLabel,
   routeOptionKey,
+  totalJourneySeconds,
   TOTAL_TIME_MAX_OPTIONS,
   walkLegsSeconds,
   type FrequencyMaxMinutes,
@@ -31,10 +37,13 @@ import {
 } from "../mergePlans";
 import { pickNextCatchableDeparture } from "../formatDeparture";
 import { rememberPlace } from "../placeHistory";
+import { buildDemoState, isDemoUrl } from "../demo/mockPlan";
 
 type Endpoint = { label: string; location: LatLng } | null;
 
 const ALL_MODES: PlanMode[] = ["walk_transit", "transit_walk"];
+
+const WALK_MINUTE_OPTIONS = [5, 10, 15, 20, 25, 30];
 
 const DEFAULT_SCHEDULE: ScheduleFilter = {
   hoursStart: 6,
@@ -76,8 +85,11 @@ export function PlannerPage() {
   const [instancePath, setInstancePath] = useState<TripPathResponse | null>(null);
   const [instanceLoading, setInstanceLoading] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [locating, setLocating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [apiOk, setApiOk] = useState<boolean | null>(null);
+  const [demoMode, setDemoMode] = useState(() => isDemoUrl());
+  const [sheetExpanded, setSheetExpanded] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const departuresAbortRef = useRef<AbortController | null>(null);
   const instanceAbortRef = useRef<AbortController | null>(null);
@@ -168,6 +180,27 @@ export function PlannerPage() {
 
   const showModeOnCards = enabledModes.length > 1 && Boolean(plan);
 
+  const sheetPeekLabel = useMemo(() => {
+    if (loading) return "Planning…";
+    if (isAdjusting && plan) {
+      if (selectedRoute && origin?.location && destination?.location) {
+        const total = totalJourneySeconds(
+          selectedRoute,
+          origin.location,
+          destination.location,
+        );
+        const mins = Math.max(1, Math.round(total / 60));
+        const headsign =
+          selectedRoute.tripHeadsign || selectedRoute.routeLongName || "Route";
+        return `Line ${routeBadgeLabel(selectedRoute)} · ${headsign} · ${mins} min`;
+      }
+      const count = plan.routes.length;
+      return `${count} route${count === 1 ? "" : "s"}`;
+    }
+    if (canPlan) return "Tap Plan trip to see routes";
+    return "Choose an origin and destination";
+  }, [loading, isAdjusting, plan, selectedRoute, origin, destination, canPlan]);
+
   const selectedDepartures = selectedKey ? departuresByKey[selectedKey] ?? null : null;
 
   useEffect(() => {
@@ -193,6 +226,7 @@ export function PlannerPage() {
       setDeparturesFetchedSig("");
       return;
     }
+    if (demoMode) return;
     const controller = new AbortController();
     departuresAbortRef.current = controller;
     setDeparturesLoading(true);
@@ -231,7 +265,7 @@ export function PlannerPage() {
       setDeparturesFetchedSig(fetchSig);
     });
     return () => controller.abort();
-  }, [basePlan?.requestId, routeKeysSig]);
+  }, [basePlan?.requestId, routeKeysSig, demoMode]);
 
   /** Default the selected option to the next catchable trip so get-on clocks match "Next bus". */
   useEffect(() => {
@@ -264,6 +298,7 @@ export function PlannerPage() {
   ]);
 
   useEffect(() => {
+    if (demoMode) return;
     instanceAbortRef.current?.abort();
     if (!selectedRoute || !activeDeparture) {
       setInstancePath(null);
@@ -292,7 +327,7 @@ export function PlannerPage() {
         if (!controller.signal.aborted) setInstanceLoading(false);
       });
     return () => controller.abort();
-  }, [selectedRoute, activeDeparture]);
+  }, [selectedRoute, activeDeparture, demoMode]);
 
   /** Map uses the clicked schedule trip when set; otherwise the plan's representative trip. */
   const mapSelectedRoute = useMemo((): DirectRoute | null => {
@@ -346,11 +381,59 @@ export function PlannerPage() {
     setLimitTotalWalk((prev) => !prev);
   }
 
+  function loadDemo() {
+    const demo = buildDemoState();
+    abortRef.current?.abort();
+    departuresAbortRef.current?.abort();
+    instanceAbortRef.current?.abort();
+    setDemoMode(true);
+    setOrigin(demo.endpoints.origin);
+    setDestination(demo.endpoints.destination);
+    setPlansByMode(demo.plansByMode);
+    setCommittedMinutes(15);
+    setSliderDraft(15);
+    setSelectedRoute(demo.selectedRoute);
+    setDeparturesByKey(demo.departuresByKey);
+    setDeparturesLoading(false);
+    setDeparturesFetchedSig(demo.departuresFetchedSig);
+    setScheduleExpanded(false);
+    setActiveDeparture(null);
+    setInstancePath(null);
+    setLoading(false);
+    setError(null);
+    userPickedDepartureRef.current = false;
+    setSheetExpanded(false);
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      url.searchParams.set("demo", "1");
+      window.history.replaceState({}, "", url);
+    }
+  }
+
+  function exitDemo() {
+    setDemoMode(false);
+    startNewQuery();
+    setOrigin(null);
+    setDestination(null);
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("demo");
+      window.history.replaceState({}, "", url);
+    }
+  }
+
+  useEffect(() => {
+    if (isDemoUrl()) loadDemo();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on mount when ?demo=1
+  }, []);
+
   async function runPlan(minutes = committedMinutes, scheduleOverride?: ScheduleFilter) {
     if (!origin || !destination) {
       setError("Choose both origin and destination");
       return;
     }
+    if (demoMode) setDemoMode(false);
+    setSheetExpanded(false);
     const sched = scheduleOverride ?? schedule;
     abortRef.current?.abort();
     const controller = new AbortController();
@@ -431,6 +514,28 @@ export function PlannerPage() {
     setError(null);
   }
 
+  function clearOrigin() {
+    setOrigin(null);
+    setPlansByMode({});
+    setSelectedRoute(null);
+    setError(null);
+  }
+
+  function clearDestination() {
+    setDestination(null);
+    setPlansByMode({});
+    setSelectedRoute(null);
+    setError(null);
+  }
+
+  function swapEndpoints() {
+    setOrigin(destination);
+    setDestination(origin);
+    setPlansByMode({});
+    setSelectedRoute(null);
+    setError(null);
+  }
+
   function startNewQuery() {
     abortRef.current?.abort();
     setPlansByMode({});
@@ -443,6 +548,7 @@ export function PlannerPage() {
     setMaxFrequencyMinutes("all");
     setMaxTotalTimeMinutes(90);
     setSchedule(DEFAULT_SCHEDULE);
+    setSheetExpanded(false);
   }
 
   function handleScheduleChange(next: ScheduleFilter) {
@@ -451,221 +557,144 @@ export function PlannerPage() {
     void runPlan(committedMinutes, next);
   }
 
-  const filterButtons = (
-    <div className="map-filter-stack">
-      <div className="mode-row" role="group" aria-label="Result filters">
-        {ALL_MODES.map((mode) => (
-          <button
-            key={mode}
-            type="button"
-            className={enabledModes.includes(mode) ? "active" : ""}
-            aria-pressed={enabledModes.includes(mode)}
-            onClick={() => toggleMode(mode)}
-          >
-            {modeLabel(mode)}
-          </button>
-        ))}
-        <button
-          type="button"
-          className={`mode-total${limitTotalWalk ? " active" : ""}`}
-          aria-pressed={limitTotalWalk}
-          onClick={toggleTotalWalkLimit}
-          title="Hide options where walk to the stop plus walk after exceeds max walking time"
-        >
-          Walks ≤ {committedMinutes} min
-        </button>
-        <button
-          type="button"
-          className={`mode-total${limitSoonDepartures ? " active" : ""}`}
-          aria-pressed={limitSoonDepartures}
-          disabled={!departuresReady && Boolean(basePlan?.routes.length)}
-          onClick={() => setLimitSoonDepartures((v) => !v)}
-          title="Hide options with no catchable departure within about 3 hours"
-        >
-          Next ≤ 3h
-        </button>
-      </div>
-      <div className="freq-row freq-row-wide" role="group" aria-label="Max station frequency">
-        <span className="freq-row-label">Max freq</span>
-        {FREQUENCY_MAX_OPTIONS.map((mins) => (
-          <button
-            key={String(mins)}
-            type="button"
-            className={maxFrequencyMinutes === mins ? "active" : ""}
-            aria-pressed={maxFrequencyMinutes === mins}
-            title={
-              mins === "all"
-                ? "Show all stations, including unknown frequency"
-                : mins >= 30
-                  ? "Only stations with a known frequency (any headway)"
-                  : `Only stations every ${mins} min or more often`
-            }
-            onClick={() => setMaxFrequencyMinutes(mins)}
-          >
-            {mins === "all" ? "All" : `≤${mins}`}
-          </button>
-        ))}
-      </div>
-      <div className="freq-row" role="group" aria-label="Max total journey time">
-        <span className="freq-row-label">Total</span>
-        {TOTAL_TIME_MAX_OPTIONS.map((mins) => (
-          <button
-            key={mins}
-            type="button"
-            className={maxTotalTimeMinutes === mins ? "active" : ""}
-            aria-pressed={maxTotalTimeMinutes === mins}
-            title={`Only options with walk + ride + walk ≤ ${mins} min`}
-            onClick={() => setMaxTotalTimeMinutes(mins)}
-          >
-            ≤{mins}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
+  async function useMyLocation() {
+    if (!navigator.geolocation) {
+      setError("Location is not available in this browser");
+      return;
+    }
+    setLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const location = { lng: pos.coords.longitude, lat: pos.coords.latitude };
+        try {
+          const { results } = await reversePlace(location);
+          const label = results[0]?.label ?? "Current location";
+          selectOrigin({ label, location });
+        } catch (err) {
+          console.error("[reverse]", err);
+          selectOrigin({ label: "Current location", location });
+        } finally {
+          setLocating(false);
+        }
+      },
+      (err) => {
+        console.error("[geolocation]", err);
+        setError("Could not get your location");
+        setLocating(false);
+      },
+      { enableHighAccuracy: true, timeout: 10000 },
+    );
+  }
 
   return (
     <div className="app-shell">
-      <aside className="sidebar">
-        <header className="brand">
-          <p className="eyebrow">Israel · Phase 1</p>
-          <h1>Walk + Transit</h1>
-          <p className="lede">
-            {isAdjusting
-              ? "Adjust filters on the map, or start a new query."
-              : "Choose origin and destination, set walking time, then plan."}
-          </p>
-          <p className={`api-pill ${apiOk ? "ok" : apiOk === false ? "bad" : ""}`}>
-            {apiOk === null ? "Checking API…" : apiOk ? "API connected" : "API offline — run npm run dev"}
-          </p>
-        </header>
+      {demoMode ? (
+        <div className="demo-banner" role="status">
+          <span>Demo trip — sample Tel Aviv routes, not live data</span>
+          <button type="button" className="linkish" onClick={exitDemo}>
+            Exit demo
+          </button>
+        </div>
+      ) : null}
+      <header className="top-chrome">
+        <div className="app-header">
+          <div className="app-brand" aria-label="Walk2Ride">
+            <img className="app-logo-icon" src="/logo-icon.png" alt="" aria-hidden />
+            <span className="app-logo-text">Walk2Ride</span>
+          </div>
+          {!demoMode && apiOk === false ? <p className="api-pill bad">API offline</p> : null}
+        </div>
 
-        <section className="controls">
-          {isAdjusting && origin && destination ? (
-            <>
-              <div className="trip-facts" aria-label="Planned trip">
-                <div className="trip-fact">
-                  <span>From</span>
-                  <strong>{origin.label}</strong>
-                </div>
-                <div className="trip-fact">
-                  <span>To</span>
-                  <strong>{destination.label}</strong>
-                </div>
-                <div className="trip-fact">
-                  <span>Max walk</span>
-                  <strong>{committedMinutes} min</strong>
-                </div>
-              </div>
-              <button type="button" className="secondary" onClick={startNewQuery}>
-                New query
-              </button>
-            </>
-          ) : (
-            <>
-              <div className="place-pair">
-                <PlaceInput
-                  label="Origin"
-                  valueLabel={origin?.label ?? ""}
-                  onSelect={selectOrigin}
-                />
-                <PlaceInput
-                  label="Destination"
-                  valueLabel={destination?.label ?? ""}
-                  onSelect={selectDestination}
-                />
-              </div>
-
-              <label className="slider-block">
-                <div className="slider-label">
-                  <span>Max walking time</span>
-                  <strong>{sliderDraft} min</strong>
-                </div>
-                <input
-                  type="range"
-                  min={5}
-                  max={30}
-                  step={1}
-                  value={sliderDraft}
-                  onChange={(e) => setSliderDraft(Number(e.target.value))}
-                />
-              </label>
-
-              <button
-                type="button"
-                className="primary"
-                disabled={loading || !canPlan}
-                onClick={() => {
-                  void runPlan(sliderDraft);
-                }}
-              >
-                {loading ? "Planning…" : "Plan trip"}
-              </button>
-
-              {!canPlan ? (
-                <p className="loading-status">Select origin and destination to plan.</p>
-              ) : null}
-            </>
-          )}
-
-          {loading ? (
-            <p className="loading-status" role="status" aria-live="polite">
-              <span className="spinner" aria-hidden />
-              Planning walk + transit…
-            </p>
-          ) : null}
-
-          {error ? (
-            <p className="field-error" role="alert">
-              {error}
-            </p>
-          ) : null}
-
-          {isAdjusting && plan ? (
-            <div className="meta-box">
-              <p>
-                <strong>{plan.meta.validStopCount}</strong> stops · {plan.meta.routeCount} route
-                options · {plan.meta.elapsedMs} ms
-                {plan.meta.isochroneCached ? " · isochrone cached" : ""}
-              </p>
-              {plan.warnings.map((w) => (
-                <p key={w} className="warn">
-                  {w}
-                </p>
-              ))}
+        <div className="search-card">
+          <div className="search-card-route">
+            <div className="route-rail" aria-hidden>
+              <span className="route-dot origin" />
+              <span className="route-line" />
+              <span className="route-dot destination" />
             </div>
-          ) : null}
-        </section>
+            <div className="route-fields">
+              <PlaceInput
+                label="Origin"
+                endpoint="origin"
+                embedded
+                placeholder="Starting point"
+                valueLabel={origin?.label ?? ""}
+                onSelect={selectOrigin}
+                onClear={clearOrigin}
+              />
+              <div className="route-divider" aria-hidden />
+              <PlaceInput
+                label="Destination"
+                endpoint="destination"
+                embedded
+                placeholder="Destination"
+                valueLabel={destination?.label ?? ""}
+                onSelect={selectDestination}
+                onClear={clearDestination}
+              />
+            </div>
+            <button
+              type="button"
+              className="swap-btn"
+              aria-label="Swap origin and destination"
+              disabled={!origin && !destination}
+              onClick={swapEndpoints}
+            >
+              <Icon name="swap" size={16} />
+            </button>
+          </div>
 
-        {isAdjusting ? (
-          <RouteResults
-            routes={plan?.routes ?? []}
-            selectedId={selectedKey}
-            onSelect={handleSelectRoute}
-            loading={loading}
-            showMode={showModeOnCards}
-            origin={origin?.location ?? null}
-            destination={destination?.location ?? null}
-            departuresByKey={departuresByKey}
-            departuresLoading={departuresLoading}
-            scheduleExpanded={scheduleExpanded}
-            onOpenSchedule={() => setScheduleExpanded(true)}
-            onCollapseSchedule={handleCollapseSchedule}
-            activeDeparture={activeDeparture}
-            onSelectDeparture={handleSelectDeparture}
-            instancePath={instancePath}
-            instanceLoading={instanceLoading}
-          />
+          <div className="search-card-actions">
+            <SelectChip
+              icon="walk"
+              label="Max walk"
+              variant="control"
+              value={String(sliderDraft)}
+              options={WALK_MINUTE_OPTIONS.map((mins) => ({
+                value: String(mins),
+                label: `${mins} min`,
+              }))}
+              onChange={(next) => setSliderDraft(Number(next))}
+            />
+            <button
+              type="button"
+              className="primary"
+              disabled={loading || !canPlan}
+              onClick={() => {
+                void runPlan(sliderDraft);
+              }}
+            >
+              {loading ? "Planning…" : "Plan trip"}
+            </button>
+          </div>
+        </div>
+
+        {error ? (
+          <p className="field-error" role="alert">
+            {error}
+          </p>
         ) : null}
-      </aside>
+      </header>
 
       <main className="map-pane">
-        {isAdjusting ? (
-          <div className="map-toolbar">
-            {filterButtons}
+        <div className="map-chrome">
+          <FilterBar
+            enabledModes={enabledModes}
+            onModesChange={setEnabledModes}
+            limitTotalWalk={limitTotalWalk}
+            walkLimitMinutes={committedMinutes}
+            onWalkLimitChange={setLimitTotalWalk}
+            maxFrequencyMinutes={maxFrequencyMinutes}
+            onFrequencyChange={setMaxFrequencyMinutes}
+            maxTotalTimeMinutes={maxTotalTimeMinutes}
+            onTotalTimeChange={setMaxTotalTimeMinutes}
+            disabled={!isAdjusting}
+          />
+          {isAdjusting ? (
             <ScheduleFilters value={schedule} onChange={handleScheduleChange} />
-          </div>
-        ) : null}
+          ) : null}
+        </div>
+
         <TransitMap
           origin={origin?.location ?? null}
           destination={destination?.location ?? null}
@@ -681,7 +710,78 @@ export function PlannerPage() {
               : undefined
           }
         />
+
+        <button
+          type="button"
+          className="locate-fab"
+          aria-label="Use my location as origin"
+          disabled={locating}
+          onClick={() => {
+            void useMyLocation();
+          }}
+        >
+          {locating ? <span className="spinner" aria-hidden /> : <Icon name="locate" size={20} />}
+        </button>
       </main>
+
+      <section
+        className={`route-sheet${sheetExpanded ? " expanded" : " collapsed"}`}
+        aria-label="Route options"
+      >
+        <button
+          type="button"
+          className="route-sheet-toggle"
+          aria-expanded={sheetExpanded}
+          onClick={() => setSheetExpanded((open) => !open)}
+        >
+          <span className="route-sheet-handle" aria-hidden />
+          <span className="route-sheet-peek">{sheetPeekLabel}</span>
+          <Icon name={sheetExpanded ? "chevronDown" : "chevronUp"} size={18} />
+        </button>
+        {sheetExpanded ? (
+          <div className="route-sheet-body">
+            {isAdjusting ? (
+              <RouteResults
+                routes={plan?.routes ?? []}
+                selectedId={selectedKey}
+                onSelect={handleSelectRoute}
+                loading={loading}
+                showMode={showModeOnCards}
+                origin={origin?.location ?? null}
+                destination={destination?.location ?? null}
+                departuresByKey={departuresByKey}
+                departuresLoading={departuresLoading}
+                scheduleExpanded={scheduleExpanded}
+                onOpenSchedule={() => setScheduleExpanded(true)}
+                onCollapseSchedule={handleCollapseSchedule}
+                activeDeparture={activeDeparture}
+                onSelectDeparture={handleSelectDeparture}
+                instancePath={instancePath}
+                instanceLoading={instanceLoading}
+              />
+            ) : (
+              <div className="results-panel muted results-empty">
+                <p>
+                  {loading
+                    ? "Planning walk + transit…"
+                    : canPlan
+                      ? "Tap Plan trip to see routes."
+                      : "Choose an origin and destination to see routes."}
+                </p>
+                {!loading && !isAdjusting ? (
+                  <button type="button" className="secondary view-demo-btn" onClick={loadDemo}>
+                    View demo trip
+                  </button>
+                ) : null}
+              </div>
+            )}
+            <p className="sheet-footnote">
+              Times are estimates
+              {plan ? ` · ${plan.meta.routeCount} options · ${plan.meta.elapsedMs} ms` : ""}
+            </p>
+          </div>
+        ) : null}
+      </section>
     </div>
   );
 }

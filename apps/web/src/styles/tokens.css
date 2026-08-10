@@ -1,0 +1,59 @@
+/**
+ * Walk2Ride design tokens — phase 1 foundation.
+ * Prefer these names in new UI; legacy aliases keep older selectors working.
+ */
+:root {
+  /* Brand / surfaces */
+  --ink: #1a2744;
+  --muted: #6b7280;
+  --page: #f3f4f6;
+  --surface: #ffffff;
+  --line: #e5e7eb;
+  --line-strong: #d1d5db;
+
+  /* Semantic */
+  --primary: #1a2744;
+  --primary-hover: #121c33;
+  --origin: #16a34a;
+  --destination: #dc2626;
+  --transit: #2563eb;
+  --live: #16a34a;
+  --danger: #b91c1c;
+  --warn: #b45309;
+  --success-bg: #dcfce7;
+  --danger-bg: #fee2e2;
+  --origin-bg: #ecfdf5;
+  --destination-bg: #fef2f2;
+  --transit-bg: #eff6ff;
+
+  /* Type */
+  --font-body: "IBM Plex Sans", system-ui, sans-serif;
+  --font-display: var(--font-body);
+  --text-xs: 0.72rem;
+  --text-sm: 0.82rem;
+  --text-md: 0.92rem;
+  --text-lg: 1.05rem;
+  --text-title: 1.35rem;
+
+  /* Space */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+
+  /* Shape */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-pill: 999px;
+  --shadow: 0 8px 24px rgba(26, 39, 68, 0.1);
+  --shadow-sheet: 0 -10px 32px rgba(26, 39, 68, 0.08);
+
+  /* Legacy aliases (existing CSS) */
+  --paper: var(--page);
+  --panel: var(--surface);
+  --teal: var(--primary);
+  --teal-deep: var(--primary);
+  --amber: var(--warn);
+}

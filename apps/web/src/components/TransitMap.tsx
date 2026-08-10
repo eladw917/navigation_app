@@ -62,10 +62,17 @@ function appendCoordinatePoints(value: unknown, points: LatLng[]): void {
 }
 
 /** Avoid MapLibre world-zoom when padding exceeds the map container size. */
+const STATION_POPUP_BOTTOM_PAD = 280;
+
 function safeFitBounds(
   map: MapLibreMap,
   points: LatLng[],
-  opts?: { maxZoom?: number; duration?: number; minPad?: number },
+  opts?: {
+    maxZoom?: number;
+    duration?: number;
+    minPad?: number;
+    padding?: { top?: number; bottom?: number; left?: number; right?: number };
+  },
 ) {
   const valid = points.filter(isValidLngLat);
   if (!valid.length) return;
@@ -78,7 +85,13 @@ function safeFitBounds(
   const maxZoom = opts?.maxZoom ?? 15;
   const duration = opts?.duration ?? 450;
   const minPad = opts?.minPad ?? 24;
-  const pad = Math.max(minPad, Math.min(72, Math.floor(Math.min(w, h) * 0.1)));
+  const edge = Math.max(minPad, Math.min(72, Math.floor(Math.min(w, h) * 0.1)));
+  const padding = {
+    top: opts?.padding?.top ?? edge,
+    bottom: opts?.padding?.bottom ?? edge,
+    left: opts?.padding?.left ?? edge,
+    right: opts?.padding?.right ?? edge,
+  };
 
   if (valid.length === 1) {
     const p = valid[0]!;
@@ -86,6 +99,7 @@ function safeFitBounds(
       center: [p.lng, p.lat],
       zoom: Math.min(14, maxZoom),
       duration,
+      padding,
     });
     return;
   }
@@ -95,10 +109,15 @@ function safeFitBounds(
   if (bounds.isEmpty()) return;
 
   map.fitBounds(bounds, {
-    padding: { top: pad, bottom: pad, left: pad, right: pad },
+    padding,
     maxZoom,
     duration,
   });
+}
+
+function fitPaddingForPopup(reservePopup: boolean) {
+  if (!reservePopup) return undefined;
+  return { top: 72, bottom: STATION_POPUP_BOTTOM_PAD, left: 40, right: 40 };
 }
 
 type Props = {
@@ -1581,8 +1600,8 @@ export function TransitMap({
       }
     };
 
-    syncMarker(originMarkerRef, originRef.current, "#0f766e");
-    syncMarker(destinationMarkerRef, destinationRef.current, "#b45309");
+    syncMarker(originMarkerRef, originRef.current, "#16a34a");
+    syncMarker(destinationMarkerRef, destinationRef.current, "#dc2626");
   });
 
   const whenMapReady = useRef((fn: () => void) => {
@@ -1681,9 +1700,9 @@ export function TransitMap({
         filter: ["==", ["get", "kind"], "transit"],
         layout: { "line-cap": "round", "line-join": "round" },
         paint: {
-          "line-color": "#0f766e",
+          "line-color": "#2563eb",
           "line-width": 5.5,
-          "line-opacity": 0.92,
+          "line-opacity": 0.95,
         },
       });
       map.addLayer({
@@ -1693,9 +1712,9 @@ export function TransitMap({
         filter: ["==", ["get", "kind"], "walk"],
         layout: { "line-cap": "round", "line-join": "round" },
         paint: {
-          "line-color": "#b45309",
+          "line-color": "#16a34a",
           "line-width": 3.5,
-          "line-opacity": 0.9,
+          "line-opacity": 0.95,
           "line-dasharray": [1.8, 1.4],
         },
       });
@@ -2044,11 +2063,20 @@ export function TransitMap({
           if (alight) points.push({ lng: alight.lng, lat: alight.lat });
           if (isValidLngLat(origin)) points.push(origin);
           if (isValidLngLat(destination)) points.push(destination);
-          safeFitBounds(map, points, { maxZoom: 14, duration: 500 });
+          safeFitBounds(map, points, {
+            maxZoom: 14,
+            duration: 500,
+            padding: fitPaddingForPopup(true),
+          });
         } else if (currentStation) {
-          map.easeTo({
-            center: [currentStation.lng, currentStation.lat],
+          const points: LatLng[] = [];
+          if (isValidLngLat(origin)) points.push(origin);
+          if (isValidLngLat(destination)) points.push(destination);
+          points.push({ lng: currentStation.lng, lat: currentStation.lat });
+          safeFitBounds(map, points, {
+            maxZoom: 14,
             duration: 350,
+            padding: fitPaddingForPopup(true),
           });
         }
         return;
@@ -2072,7 +2100,11 @@ export function TransitMap({
           const geometry = feature.geometry as { coordinates?: unknown } | undefined;
           appendCoordinatePoints(geometry?.coordinates, points);
         }
-        safeFitBounds(map, points, { maxZoom: 14, duration: 600 });
+        safeFitBounds(map, points, {
+          maxZoom: 14,
+          duration: 600,
+          padding: fitPaddingForPopup(Boolean(browse)),
+        });
       }
 
       syncEndpointMarkers.current();
@@ -2159,38 +2191,40 @@ export function TransitMap({
       ) : null}
       {browse && currentStation ? (
         <div className="bus-popup" role="dialog" aria-label="Bus station browser">
-          {browse.bus ? (
-            <button
-              type="button"
-              className="bus-popup-reset"
-              aria-label="Restore recommended path"
-              title="Restore recommended path"
-              onClick={restoreRecommendedPath}
-            >
-              Reset
-            </button>
-          ) : null}
-          <div className="bus-popup-buses">
-            {browse.buses.map((bus) => {
-              const known = busFrequencyKnown.get(bus) === true;
-              const active = bus === browse.bus;
-              return (
-                <button
-                  key={bus}
-                  type="button"
-                  className={[
-                    "popup-bus",
-                    active ? "active" : "",
-                    known ? "" : "unknown-freq",
-                  ]
-                    .filter(Boolean)
-                    .join(" ")}
-                  onClick={() => selectBus(bus)}
-                >
-                  {routeChipLabel(bus)}
-                </button>
-              );
-            })}
+          <div className="bus-popup-toolbar">
+            <div className="bus-popup-buses">
+              {browse.buses.map((bus) => {
+                const known = busFrequencyKnown.get(bus) === true;
+                const active = bus === browse.bus;
+                return (
+                  <button
+                    key={bus}
+                    type="button"
+                    className={[
+                      "popup-bus",
+                      active ? "active" : "",
+                      known ? "" : "unknown-freq",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                    onClick={() => selectBus(bus)}
+                  >
+                    {routeChipLabel(bus)}
+                  </button>
+                );
+              })}
+            </div>
+            {browse.bus ? (
+              <button
+                type="button"
+                className="bus-popup-reset"
+                aria-label="Restore recommended path"
+                title="Restore recommended path"
+                onClick={restoreRecommendedPath}
+              >
+                Reset
+              </button>
+            ) : null}
           </div>
           {browse.bus ? (
             <>

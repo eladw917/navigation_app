@@ -11,6 +11,7 @@ import {
   formatStopClock,
   pickNextCatchableDeparture,
 } from "../formatDeparture";
+import { Icon } from "./ui/Icon";
 import {
   modeLabel,
   roundedWalkSeconds,
@@ -40,9 +41,13 @@ type Props = {
   instanceLoading?: boolean;
 };
 
+function formatLegMinutes(seconds: number): string {
+  return `${Math.max(1, Math.round(seconds / 60))} min`;
+}
+
 function formatTotalMinutes(seconds: number): string {
   const minutes = Math.max(1, Math.round(seconds / 60));
-  return `~${minutes} min`;
+  return `${minutes} min`;
 }
 
 function lineTitle(route: DirectRoute): string {
@@ -210,6 +215,8 @@ export function RouteResults({
                   deps?.nowSecs,
                   walkToBoardSecs,
                 );
+          const walkLegs =
+            origin && destination ? walkLegsSeconds(route, origin, destination) : null;
           const nextLabel =
             departuresLoading && !deps
               ? "…"
@@ -221,48 +228,70 @@ export function RouteResults({
                 className={active ? "route-card active" : "route-card"}
                 onClick={() => onSelect(active ? null : route)}
               >
-                <div className="route-top">
-                  <span className="route-badge">{routeBadgeLabel(route)}</span>
-                  <span className="route-name">
-                    <span className="route-type-tag">{routeTypeLabel(route.routeType)}</span>
-                    {lineTitle(route)}
-                  </span>
+                <div className="route-card-main">
+                  <div className="route-top">
+                    <span className="route-badge">{routeBadgeLabel(route)}</span>
+                    <span className="route-name">{lineTitle(route)}</span>
+                  </div>
+                  {walkLegs ? (
+                    <div className="route-legs" aria-label="Trip legs">
+                      <span className="route-leg">
+                        <Icon name="walk" size={14} />
+                        {formatLegMinutes(walkLegs.toBoard)}
+                      </span>
+                      <span className="route-leg-dot" aria-hidden>
+                        ·
+                      </span>
+                      <span className="route-leg">
+                        <Icon name="bus" size={14} />
+                        {formatLegMinutes(route.rideDurationSeconds ?? 0)}
+                      </span>
+                      <span className="route-leg-dot" aria-hidden>
+                        ·
+                      </span>
+                      <span className="route-leg">
+                        <Icon name="walk" size={14} />
+                        {formatLegMinutes(walkLegs.fromAlight)}
+                      </span>
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="route-card-side">
                   {total != null ? (
                     <span className="route-total">{formatTotalMinutes(total)}</span>
                   ) : null}
-                </div>
-                <p className="route-meta">
-                  <span>{freq}</span>
-                  {showMode && route.planMode ? (
-                    <span className="muted"> · {modeLabel(route.planMode)}</span>
-                  ) : null}
-                </p>
-                <p className="route-next">
-                  <span>
-                    Next{" "}
-                    {route.routeType === 2
-                      ? "train"
-                      : route.routeType === 0
-                        ? "light rail"
-                        : "bus"}{" "}
-                    <strong>{nextLabel ?? "—"}</strong>
+                  <span className="route-freq">
+                    <Icon name="leaf" size={13} />
+                    {freq}
                   </span>
-                  {active && onOpenSchedule ? (
-                    <button
-                      type="button"
-                      className="info-chip"
-                      aria-label="Show all departure times"
-                      aria-expanded={scheduleExpanded}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (scheduleExpanded) onCollapseSchedule?.();
-                        else onOpenSchedule();
-                      }}
-                    >
-                      i
-                    </button>
+                  <span className="route-next">
+                    Next: <strong>{nextLabel ?? "—"}</strong>
+                  </span>
+                  {showMode && route.planMode ? (
+                    <span className="route-mode muted tiny">{modeLabel(route.planMode)}</span>
                   ) : null}
-                </p>
+                </div>
+
+                {active && onOpenSchedule ? (
+                  <button
+                    type="button"
+                    className="info-chip"
+                    aria-label="Show all departure times"
+                    aria-expanded={scheduleExpanded}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (scheduleExpanded) onCollapseSchedule?.();
+                      else onOpenSchedule();
+                    }}
+                  >
+                    i
+                  </button>
+                ) : (
+                  <span className="route-card-chevron" aria-hidden>
+                    <Icon name="chevronRight" size={18} />
+                  </span>
+                )}
               </button>
             </li>
           );

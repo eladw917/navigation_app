@@ -161,6 +161,14 @@ export async function searchPlaces(query: string, limit = 5, signal?: AbortSigna
   return apiGet<{ results: PlaceResult[] }>(`/v1/places/search?${params}`, signal);
 }
 
+export async function reversePlace(location: LatLng, signal?: AbortSignal) {
+  const params = new URLSearchParams({
+    lng: String(location.lng),
+    lat: String(location.lat),
+  });
+  return apiGet<{ results: PlaceResult[] }>(`/v1/places/reverse?${params}`, signal);
+}
+
 export async function planDirect(
   body: {
     mode: PlanMode;

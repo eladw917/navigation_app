@@ -10,7 +10,11 @@ import {
 type Props = {
   label: string;
   valueLabel: string;
+  endpoint?: "origin" | "destination";
+  placeholder?: string;
+  embedded?: boolean;
   onSelect: (place: { label: string; location: LatLng }) => void;
+  onClear?: () => void;
 };
 
 function isAbortError(err: unknown): boolean {
@@ -28,7 +32,15 @@ function shortPlaceLabel(place: PlaceResult): string {
   return parts.slice(0, 3).join(", ");
 }
 
-export function PlaceInput({ label, valueLabel, onSelect }: Props) {
+export function PlaceInput({
+  label,
+  valueLabel,
+  endpoint,
+  placeholder = "Street, place, or city",
+  embedded = false,
+  onSelect,
+  onClear,
+}: Props) {
   const [query, setQuery] = useState(valueLabel || "");
   const [results, setResults] = useState<PlaceResult[]>([]);
   const [history, setHistory] = useState<CachedPlace[]>(() => loadPlaceHistory());
@@ -179,20 +191,44 @@ export function PlaceInput({ label, valueLabel, onSelect }: Props) {
   }
 
   return (
-    <div className="place-input" ref={wrapRef}>
+    <div
+      className={["place-input", endpoint, embedded ? "embedded" : ""]
+        .filter(Boolean)
+        .join(" ")}
+      ref={wrapRef}
+    >
       <label>
-        <span>
+        <span className="sr-only">
           {label}
-          {loading ? <em className="place-loading">Searching…</em> : null}
+          {loading ? " Searching…" : ""}
         </span>
-        <input
-          value={query}
-          onChange={(e) => onChange(e.target.value)}
-          onFocus={onInputFocus}
-          onClick={onInputFocus}
-          placeholder="Street, place, or city"
-          autoComplete="off"
-        />
+        <div className="place-field">
+          {!embedded ? <span className="place-marker" aria-hidden /> : null}
+          <input
+            value={query}
+            onChange={(e) => onChange(e.target.value)}
+            onFocus={onInputFocus}
+            onClick={onInputFocus}
+            placeholder={placeholder}
+            autoComplete="off"
+          />
+          {valueLabel || query ? (
+            <button
+              type="button"
+              className="place-clear"
+              aria-label={`Clear ${label}`}
+              onClick={() => {
+                editingRef.current = false;
+                setQuery("");
+                setResults([]);
+                setOpen(false);
+                onClear?.();
+              }}
+            >
+              ×
+            </button>
+          ) : null}
+        </div>
       </label>
       {error ? <p className="field-error">{error}</p> : null}
       {open ? (
