@@ -189,14 +189,14 @@ export async function planDirect(request: DirectPlanRequest, signal?: AbortSigna
   const stopIds = stopsResult.rows.map((row) => row.stop_id);
   let scheduleRows: ScheduleRow[] = [];
   // Frequency: count departures in a 1-hour window, headway ≈ 3600/count.
-  // Bound to board/alight (+ sample) stops; soft-timeout so Plan trip never hangs.
-  const routeStopIds = [
-    ...new Set(
-      routesResult.rows.flatMap((r) => [r.board_stop_id, r.alight_stop_id]),
-    ),
+  // Route cards use the boarding stop; map pins use reachable stopIds. Alighting
+  // endpoints that are neither are irrelevant and can multiply this query's work.
+  const scheduleStopIds = [
+    ...new Set([
+      ...stopIds,
+      ...routesResult.rows.map((route) => route.board_stop_id),
+    ]),
   ];
-  const extraStopIds = stopIds.filter((id) => !routeStopIds.includes(id)).slice(0, 40);
-  const scheduleStopIds = [...routeStopIds, ...extraStopIds];
   if (scheduleStopIds.length) {
     const client = await pool.connect();
     try {
