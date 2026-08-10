@@ -65,6 +65,14 @@ mkdir -p "$RELEASE_DIR"
 git -C "$MIRROR" archive --format=tar "$SHA" | tar -x -C "$RELEASE_DIR"
 ln -sfn "$ROOT/shared/.env" "$RELEASE_DIR/.env"
 
+# Keep host deploy helpers in sync with the release being installed.
+if [[ -f "$RELEASE_DIR/ops/navigation-deploy" ]]; then
+  install -m 755 "$RELEASE_DIR/ops/navigation-deploy" "$ROOT/bin/navigation-deploy"
+fi
+if [[ -f "$RELEASE_DIR/ops/health-check.sh" ]]; then
+  install -m 755 "$RELEASE_DIR/ops/health-check.sh" "$ROOT/bin/health-check.sh"
+fi
+
 echo "installing dependencies for $SHA"
 (
   cd "$RELEASE_DIR"
