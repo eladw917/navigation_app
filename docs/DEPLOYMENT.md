@@ -64,6 +64,16 @@ See [`ops/health-check.sh`](../ops/health-check.sh).
 
 Host/user (`169.58.152.118` / `ubuntu`) are non-secret workflow config.
 
+Generated local files (gitignored; do not commit):
+
+```text
+/Users/eladweller/projects/navigationApp/.deploy-secrets/navigation-vps-deploy      → VPS_SSH_PRIVATE_KEY
+/Users/eladweller/projects/navigationApp/.deploy-secrets/navigation-vps.known_hosts → VPS_KNOWN_HOSTS
+/Users/eladweller/projects/navigationApp/.deploy-secrets/README.txt
+```
+
+Paste each file’s full contents into GitHub → Settings → Secrets and variables → Actions.
+
 ### Bootstrap (once per VPS)
 
 From a machine with admin SSH access:
