@@ -8,7 +8,7 @@ REPO_URL="${NAVIGATION_REPO_URL:-https://github.com/eladw917/navigation_app.git}
 KEEP_RELEASES="${NAVIGATION_KEEP_RELEASES:-3}"
 HEALTH_URL="${NAVIGATION_HEALTH_URL:-http://127.0.0.1:3010}"
 SERVICE_NAME="${NAVIGATION_SERVICE_NAME:-navigation-api.service}"
-LOCK_FILE="/tmp/navigation-api-deploy.lock"
+LOCK_FILE="${ROOT}/.deploy.lock"
 MIRROR="${ROOT}/repo.git"
 
 SHA="${1:-}"
@@ -33,13 +33,20 @@ else
   git -C "$MIRROR" fetch --prune origin
 fi
 
-# Only deploy SHAs that are ancestors of origin/main (or equal to it).
-if ! git -C "$MIRROR" rev-parse --verify "origin/main^{commit}" >/dev/null 2>&1; then
-  echo "origin/main missing from mirror" >&2
+# Only deploy SHAs that are ancestors of main (or equal to it).
+MAIN_REF=""
+for candidate in "refs/heads/main" "main" "origin/main" "refs/remotes/origin/main"; do
+  if git -C "$MIRROR" rev-parse --verify "${candidate}^{commit}" >/dev/null 2>&1; then
+    MAIN_REF="$candidate"
+    break
+  fi
+done
+if [[ -z "$MAIN_REF" ]]; then
+  echo "main branch missing from mirror" >&2
   exit 1
 fi
-if ! git -C "$MIRROR" merge-base --is-ancestor "$SHA" "origin/main"; then
-  echo "refusing deploy: $SHA is not on origin/main" >&2
+if ! git -C "$MIRROR" merge-base --is-ancestor "$SHA" "$MAIN_REF"; then
+  echo "refusing deploy: $SHA is not on main ($MAIN_REF)" >&2
   exit 1
 fi
 
