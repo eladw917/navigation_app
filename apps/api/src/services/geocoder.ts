@@ -1,9 +1,21 @@
 import type { PlaceResult } from "@navigation/contracts";
 import { ISRAEL_BOUNDS } from "@navigation/contracts";
+import {
+  buildQueryVariants,
+  normalizeHouseNumber,
+  normalizeText,
+  parseAddressQuery,
+  placeMatchesCity,
+  streetMatchScore,
+  tokenPhraseMatch,
+  type ParsedAddress,
+} from "./addressParse.js";
 import { env } from "../config.js";
 import { LruTtlCache } from "./lruCache.js";
 
 const searchCache = new LruTtlCache<PlaceResult[]>(300, 1000 * 60 * 15);
+
+const NOMINATIM_UA = "navigationApp/0.1 (Israeli walk+transit MVP; local-dev)";
 
 type PeliasFeature = {
   geometry?: { coordinates?: [number, number] };
@@ -33,7 +45,10 @@ type NominatimItem = {
     city?: string;
     town?: string;
     village?: string;
+    municipality?: string;
+    suburb?: string;
     road?: string;
+    pedestrian?: string;
     house_number?: string;
   };
 };
@@ -70,126 +85,81 @@ function clampConfidence(value: number | undefined): number | undefined {
   return Math.min(1, Math.max(0, value));
 }
 
-const CITY_ALIASES: Array<{ keys: string[]; needle: RegExp }> = [
-  { keys: ["תל אביב", "תל-אביב", "תל־אביב", "tel aviv", "tel-aviv"], needle: /תל[\s\-־]?אביב|tel[\s\-]?aviv/i },
-  { keys: ["ירושלים", "jerusalem"], needle: /ירושלים|jerusalem/i },
-  { keys: ["חיפה", "haifa"], needle: /חיפה|haifa/i },
-  { keys: ["גבעתיים", "givatayim", "givataim"], needle: /גבעתיים|givatayim|givataim/i },
-  { keys: ["רמת גן", "ramat gan"], needle: /רמת\s*גן|ramat\s*gan/i },
-  { keys: ["באר שבע", "beer sheva"], needle: /באר\s*שבע|beer\s*sheva/i },
-  { keys: ["נתניה", "netanya"], needle: /נתניה|netanya/i },
-  { keys: ["ראשון לציון", "ראשון", "rishon"], needle: /ראשון|rishon/i },
-  { keys: ["פתח תקווה", "petah"], needle: /פתח\s*תקווה|petah/i },
-  { keys: ["חולון", "holon"], needle: /חולון|holon/i },
-  { keys: ["בת ים", "bat yam"], needle: /בת\s*ים|bat\s*yam/i },
-  { keys: ["הרצליה", "herzliya"], needle: /הרצליה|herzliya/i },
-  { keys: ["רעננה", "raanana"], needle: /רעננה|ra'?anana/i },
-  { keys: ["כפר סבא", "kfar saba"], needle: /כפר\s*סבא|kfar\s*saba/i },
-  { keys: ["רחובות", "rehovot"], needle: /רחובות|rehovot/i },
-  { keys: ["אשדוד", "ashdod"], needle: /אשדוד|ashdod/i },
-  { keys: ["אשקלון", "ashkelon"], needle: /אשקלון|ashkelon/i },
-];
-
-function extractHouseNumber(query: string): string | null {
-  // Prefer a standalone number token (avoid years / long ids).
-  const matches = [...query.matchAll(/(?:^|[\s,])(\d{1,4}[א-תa-z]?)(?=$|[\s,])/gi)];
-  if (!matches.length) return null;
-  return matches[matches.length - 1]?.[1] ?? null;
-}
-
-function normalizeHouseNumber(value: string | null | undefined): string | null {
-  if (!value) return null;
-  const m = String(value).trim().match(/^(\d+)/);
-  return m?.[1] ?? null;
-}
-
-function cityHintFromQuery(query: string): (typeof CITY_ALIASES)[number] | null {
-  const q = query.toLowerCase();
-  for (const city of CITY_ALIASES) {
-    if (city.keys.some((k) => q.includes(k.toLowerCase()))) return city;
-  }
-  return null;
-}
-
-function placeMatchesCity(place: PlaceResult, city: (typeof CITY_ALIASES)[number]): boolean {
-  return city.needle.test(`${place.city ?? ""} ${place.label}`);
-}
-
-function queryStreetTokens(query: string): string[] {
-  return query
-    .toLowerCase()
-    .split(/[\s,]+/)
-    .filter((t) => t.length >= 2 && !/^\d+[א-תa-z]?$/i.test(t))
-    .filter((t) => !CITY_ALIASES.some((c) => c.keys.some((k) => k.toLowerCase() === t)));
-}
-
-function placeTokenHits(place: PlaceResult, tokens: string[]): number {
-  const blob = `${place.label} ${place.street ?? ""} ${place.city ?? ""}`.toLowerCase();
-  return tokens.filter((t) => blob.includes(t)).length;
-}
-
-function scorePlace(place: PlaceResult, query: string): number {
+function scorePlace(place: PlaceResult, parsed: ParsedAddress): number {
   let score = (place.confidence ?? 0.3) * 10;
-  const q = query.toLowerCase().trim();
-  const label = place.label.toLowerCase();
-  const tokens = queryStreetTokens(query);
-  const queryHn = extractHouseNumber(query);
+  const label = normalizeText(place.label).toLowerCase();
+  const queryHn = normalizeHouseNumber(parsed.housenumber);
   const placeHn = normalizeHouseNumber(place.housenumber);
-  const cityHint = cityHintFromQuery(query);
-  const tokenHits = placeTokenHits(place, tokens);
+  const streetScore = streetMatchScore(place.street, place.label, parsed);
 
   if (place.street) score += 5;
   if (place.city) score += 2;
-  if (label.includes(q)) score += 6;
 
-  score += tokenHits * 3;
-  if (tokens.length > 0 && tokenHits === tokens.length) score += 8;
-  if (tokens.length > 0 && tokenHits === 0) score -= 45; // wrong street entirely
+  // Exact free-text containment is rare for Hebrew OSM labels; keep a mild boost.
+  const rawLower = parsed.normalized.toLowerCase();
+  if (label.includes(rawLower) && rawLower.length >= 4) score += 4;
 
-  if (queryHn) {
-    if (placeHn === normalizeHouseNumber(queryHn)) {
-      score += tokenHits > 0 ? 40 : 5; // exact number only counts on a matching street
-    } else if (placeHn) {
-      score -= 50;
-    } else if (place.street && tokenHits > 0) {
-      score += 12; // correct street, OSM missing house number
-    }
-  } else if (place.housenumber) {
-    score += 4;
+  if (parsed.streetTokens.length) {
+    if (streetScore >= 3) score += 34;
+    else if (streetScore === 2) score += 24;
+    else if (streetScore === 1) score += 6;
+    else score -= 45;
   }
 
-  if (cityHint) {
-    if (placeMatchesCity(place, cityHint)) score += 25;
-    else score -= 35;
+  if (queryHn) {
+    if (placeHn && placeHn === queryHn) {
+      score += streetScore > 0 ? 45 : 5;
+    } else if (placeHn) {
+      // Wrong house number on any street is almost always a miss.
+      score -= streetScore > 0 ? 55 : 30;
+    } else if (place.street && streetScore > 0) {
+      // Correct street, OSM missing this house number — still useful as a near match.
+      score += 14;
+    }
+  } else if (place.housenumber) {
+    score += 3;
+  }
+
+  if (parsed.city) {
+    if (placeMatchesCity(place, parsed.city)) score += 28;
+    else score -= 40;
   }
 
   if (queryHn && place.housenumber && place.street) {
     const hn = place.housenumber.toLowerCase();
     const st = place.street.toLowerCase();
-    if (label.startsWith(hn) || label.startsWith(st) || label.startsWith(`${st} ${hn}`)) score += 8;
-    else score -= 6;
+    if (
+      label.startsWith(hn) ||
+      label.startsWith(st) ||
+      label.startsWith(`${st} ${hn}`) ||
+      tokenPhraseMatch(label, `${st} ${hn}`)
+    ) {
+      score += 8;
+    }
   }
 
   if (!place.street && !place.housenumber && /(ישראל|israel|מחוז)/i.test(place.label)) score -= 8;
+  // Prefer address-like features over admin/region blobs when the query looks like an address.
+  if (parsed.street && !place.street && !place.housenumber) score -= 10;
+
+  if (place.source === "overpass") score += 6;
   if (place.source === "pelias" && queryHn) score -= 12;
   if (place.source === "nominatim") score += 2;
   if (place.source === "photon") score += 1;
   return score;
 }
 
-function refineResults(places: PlaceResult[], query: string): PlaceResult[] {
-  const queryHn = normalizeHouseNumber(extractHouseNumber(query));
-  const cityHint = cityHintFromQuery(query);
-  const tokens = queryStreetTokens(query);
+function refineResults(places: PlaceResult[], parsed: ParsedAddress): PlaceResult[] {
+  const queryHn = normalizeHouseNumber(parsed.housenumber);
   let list = places;
 
-  if (cityHint) {
-    const inCity = list.filter((p) => placeMatchesCity(p, cityHint));
+  if (parsed.city) {
+    const inCity = list.filter((p) => placeMatchesCity(p, parsed.city!));
     if (inCity.length) list = inCity;
   }
 
-  if (tokens.length) {
-    const matched = list.filter((p) => placeTokenHits(p, tokens) > 0);
+  if (parsed.streetTokens.length) {
+    const matched = list.filter((p) => streetMatchScore(p.street, p.label, parsed) > 0);
     if (matched.length) list = matched;
   }
 
@@ -210,9 +180,18 @@ function dedupe(places: PlaceResult[]): PlaceResult[] {
   const seen = new Set<string>();
   const out: PlaceResult[] = [];
   for (const place of places) {
-    const key = `${place.location.lng.toFixed(4)}|${place.location.lat.toFixed(4)}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
+    const hn = normalizeHouseNumber(place.housenumber) ?? "";
+    const street = normalizeText(place.street ?? "").toLowerCase();
+    const city = normalizeText(place.city ?? "").toLowerCase();
+    // Exact addresses collapse across providers. Street-only hits collapse per city
+    // (OSM returns many nearly-identical road segments).
+    const identity = street && hn
+      ? `hn|${street}|${hn}|${city}`
+      : street
+        ? `st|${street}|${city}`
+        : `g|${place.location.lng.toFixed(4)}|${place.location.lat.toFixed(4)}`;
+    if (seen.has(identity)) continue;
+    seen.add(identity);
     out.push(place);
   }
   return out;
@@ -238,6 +217,16 @@ function normalizePelias(feature: PeliasFeature): PlaceResult | null {
   };
 }
 
+function nominatimCity(item: NominatimItem): string | undefined {
+  return (
+    item.address?.city ??
+    item.address?.town ??
+    item.address?.village ??
+    item.address?.municipality ??
+    item.address?.suburb
+  );
+}
+
 function normalizeNominatim(item: NominatimItem): PlaceResult | null {
   const lng = Number(item.lon);
   const lat = Number(item.lat);
@@ -248,8 +237,8 @@ function normalizeNominatim(item: NominatimItem): PlaceResult | null {
     location: { lng, lat },
     confidence: clampConfidence(item.importance),
     source: "nominatim",
-    city: item.address?.city ?? item.address?.town ?? item.address?.village,
-    street: item.address?.road,
+    city: nominatimCity(item),
+    street: item.address?.road ?? item.address?.pedestrian,
     housenumber: item.address?.house_number,
   };
 }
@@ -325,17 +314,45 @@ async function searchNominatim(query: string, limit: number, signal?: AbortSigna
   url.searchParams.set("addressdetails", "1");
   url.searchParams.set("limit", String(limit));
   url.searchParams.set("countrycodes", "il");
-  // Prefer more useful feature types for transit origins/destinations
   url.searchParams.set("dedupe", "1");
 
   const response = await fetch(url, {
     headers: {
       Accept: "application/json",
-      "User-Agent": "navigationApp/0.1 (Israeli walk+transit MVP; local-dev)",
+      "User-Agent": NOMINATIM_UA,
     },
     signal,
   });
   if (!response.ok) throw new Error(`Nominatim ${response.status}`);
+  const body = (await response.json()) as NominatimItem[];
+  return body.map(normalizeNominatim).filter((r): r is PlaceResult => r != null);
+}
+
+/** Structured Nominatim search — much better for street + house number + city. */
+async function searchNominatimStructured(
+  parsed: ParsedAddress,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<PlaceResult[]> {
+  if (!parsed.street) return [];
+  const url = new URL("https://nominatim.openstreetmap.org/search");
+  const street = parsed.housenumber ? `${parsed.housenumber} ${parsed.street}` : parsed.street;
+  url.searchParams.set("street", street);
+  if (parsed.city) url.searchParams.set("city", parsed.city.nameHe);
+  url.searchParams.set("country", "Israel");
+  url.searchParams.set("format", "json");
+  url.searchParams.set("addressdetails", "1");
+  url.searchParams.set("limit", String(limit));
+  url.searchParams.set("countrycodes", "il");
+
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/json",
+      "User-Agent": NOMINATIM_UA,
+    },
+    signal,
+  });
+  if (!response.ok) throw new Error(`Nominatim structured ${response.status}`);
   const body = (await response.json()) as NominatimItem[];
   return body.map(normalizeNominatim).filter((r): r is PlaceResult => r != null);
 }
@@ -345,7 +362,6 @@ async function searchPhoton(query: string, limit: number, signal?: AbortSignal):
   url.searchParams.set("q", query);
   url.searchParams.set("limit", String(limit));
   url.searchParams.set("lang", "default");
-  // Israel bbox: minLon,minLat,maxLon,maxLat
   url.searchParams.set(
     "bbox",
     `${ISRAEL_BOUNDS.minLng},${ISRAEL_BOUNDS.minLat},${ISRAEL_BOUNDS.maxLng},${ISRAEL_BOUNDS.maxLat}`,
@@ -360,29 +376,137 @@ async function searchPhoton(query: string, limit: number, signal?: AbortSignal):
   return (body.features ?? []).map(normalizePhoton).filter((r): r is PlaceResult => r != null);
 }
 
-export async function searchPlaces(query: string, limit = 5, signal?: AbortSignal): Promise<PlaceResult[]> {
-  const trimmed = query.trim();
-  if (!trimmed) return [];
-  if (signal?.aborted) return [];
-  const capped = Math.min(Math.max(limit, 1), 10);
-  const key = `s5|${trimmed.toLowerCase()}|${capped}`;
-  const hit = searchCache.get(key);
-  if (hit) return hit;
+type OverpassElement = {
+  type: string;
+  id: number;
+  lat?: number;
+  lon?: number;
+  center?: { lat: number; lon: number };
+  tags?: Record<string, string>;
+};
 
-  const hasHouseNumber = Boolean(extractHouseNumber(trimmed));
-  // Pelias often returns nearby wrong house numbers for Israeli streets.
-  const providers = hasHouseNumber
-    ? [searchNominatim(trimmed, capped, signal), searchPhoton(trimmed, capped, signal)]
-    : [
-        searchNominatim(trimmed, capped, signal),
-        searchPhoton(trimmed, capped, signal),
-        searchPelias(trimmed, capped, signal),
-      ];
+/**
+ * When free-text geocoders return the street but miss the house number, ask Overpass
+ * for addr:housenumber nodes/ways near a focus point (city or street hit).
+ */
+async function searchOverpassHouseNumber(
+  parsed: ParsedAddress,
+  focus: { lng: number; lat: number },
+  signal?: AbortSignal,
+): Promise<PlaceResult[]> {
+  if (!parsed.street || !parsed.housenumber) return [];
+  const hn = normalizeHouseNumber(parsed.housenumber);
+  if (!hn) return [];
 
-  const settled = await Promise.allSettled(providers);
+  // ~3.5km box around focus — enough for a city neighborhood, small enough for Overpass.
+  const pad = 0.035;
+  const south = focus.lat - pad;
+  const west = focus.lng - pad;
+  const north = focus.lat + pad;
+  const east = focus.lng + pad;
 
-  if (signal?.aborted) return [];
+  const street = parsed.street.replace(/"/g, "");
+  const streetRegex = street
+    .split(/\s+/)
+    .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join(".*");
 
+  const query = `
+[out:json][timeout:12];
+(
+  node["addr:housenumber"~"^${hn}$",i]["addr:street"~"${streetRegex}",i](${south},${west},${north},${east});
+  way["addr:housenumber"~"^${hn}$",i]["addr:street"~"${streetRegex}",i](${south},${west},${north},${east});
+);
+out center 8;
+`.trim();
+
+  // Public Overpass is often slow/504 — never block place search for long.
+  const timeout = AbortSignal.timeout(2500);
+  const combined =
+    signal != null && typeof AbortSignal.any === "function"
+      ? AbortSignal.any([signal, timeout])
+      : timeout;
+
+  const response = await fetch("https://overpass-api.de/api/interpreter", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+      Accept: "application/json",
+      "User-Agent": NOMINATIM_UA,
+    },
+    body: new URLSearchParams({ data: query }),
+    signal: combined,
+  });
+  if (!response.ok) throw new Error(`Overpass ${response.status}`);
+  const body = (await response.json()) as { elements?: OverpassElement[] };
+  const out: PlaceResult[] = [];
+  for (const el of body.elements ?? []) {
+    const lat = el.lat ?? el.center?.lat;
+    const lng = el.lon ?? el.center?.lon;
+    if (lat == null || lng == null || !inIsrael(lng, lat)) continue;
+    const tags = el.tags ?? {};
+    const streetName = tags["addr:street"] ?? parsed.street;
+    const house = tags["addr:housenumber"] ?? parsed.housenumber;
+    const city = tags["addr:city"] ?? parsed.city?.nameHe;
+    const label = [streetName, house, city].filter(Boolean).join(" ");
+    out.push({
+      id: `overpass:${el.type}/${el.id}`,
+      label,
+      location: { lng, lat },
+      confidence: 0.92,
+      source: "overpass",
+      city,
+      street: streetName,
+      housenumber: house,
+    });
+  }
+  return out;
+}
+
+function pickOverpassFocus(parsed: ParsedAddress, places: PlaceResult[]): { lng: number; lat: number } | null {
+  if (parsed.city?.focus) return parsed.city.focus;
+  const streetHit = places.find((p) => streetMatchScore(p.street, p.label, parsed) > 0);
+  if (streetHit) return streetHit.location;
+  return null;
+}
+
+function needsHouseNumberLookup(parsed: ParsedAddress, places: PlaceResult[]): boolean {
+  const hn = normalizeHouseNumber(parsed.housenumber);
+  if (!hn || !parsed.street) return false;
+  return !places.some(
+    (p) =>
+      normalizeHouseNumber(p.housenumber) === hn && streetMatchScore(p.street, p.label, parsed) > 0,
+  );
+}
+
+async function collectProviderResults(
+  parsed: ParsedAddress,
+  capped: number,
+  signal?: AbortSignal,
+): Promise<PlaceResult[]> {
+  const variants = buildQueryVariants(parsed);
+  const primary = variants[0] ?? parsed.normalized;
+  const secondary = variants.find((v) => v !== primary);
+
+  const hasHouseNumber = Boolean(parsed.housenumber);
+  const jobs: Array<Promise<PlaceResult[]>> = [
+    searchNominatim(primary, capped, signal),
+    searchPhoton(primary, capped, signal),
+  ];
+
+  if (parsed.street) {
+    jobs.push(searchNominatimStructured(parsed, capped, signal));
+  }
+  if (secondary) {
+    jobs.push(searchNominatim(secondary, capped, signal));
+    jobs.push(searchPhoton(secondary, capped, signal));
+  }
+  // Pelias often invents wrong Israeli house numbers — only use for POI / city queries.
+  if (!hasHouseNumber) {
+    jobs.push(searchPelias(primary, capped, signal));
+  }
+
+  const settled = await Promise.allSettled(jobs);
   const merged: PlaceResult[] = [];
   for (const result of settled) {
     if (result.status === "fulfilled") merged.push(...result.value);
@@ -390,13 +514,42 @@ export async function searchPlaces(query: string, limit = 5, signal?: AbortSigna
       console.warn("[geocoder] provider failed:", result.reason);
     }
   }
+  return merged;
+}
+
+export async function searchPlaces(query: string, limit = 5, signal?: AbortSignal): Promise<PlaceResult[]> {
+  const trimmed = query.trim();
+  if (!trimmed) return [];
+  if (signal?.aborted) return [];
+  const capped = Math.min(Math.max(limit, 1), 10);
+  const key = `s6|${trimmed.toLowerCase()}|${capped}`;
+  const hit = searchCache.get(key);
+  if (hit) return hit;
+
+  const parsed = parseAddressQuery(trimmed);
+  let merged = await collectProviderResults(parsed, capped, signal);
+  if (signal?.aborted) return [];
+
+  if (needsHouseNumberLookup(parsed, merged)) {
+    const focus = pickOverpassFocus(parsed, merged);
+    if (focus) {
+      try {
+        const overpassHits = await searchOverpassHouseNumber(parsed, focus, signal);
+        merged.push(...overpassHits);
+      } catch (err) {
+        if (!isAbortReason(err)) console.warn("[geocoder] overpass failed:", err);
+      }
+    }
+  }
+
+  if (signal?.aborted) return [];
 
   const ranked = refineResults(
     dedupe(merged)
-      .map((place) => ({ place, score: scorePlace(place, trimmed) }))
+      .map((place) => ({ place, score: scorePlace(place, parsed) }))
       .sort((a, b) => b.score - a.score)
       .map((x) => x.place),
-    trimmed,
+    parsed,
   ).slice(0, capped);
 
   if (ranked.length) searchCache.set(key, ranked);
@@ -405,33 +558,44 @@ export async function searchPlaces(query: string, limit = 5, signal?: AbortSigna
 
 function isAbortReason(reason: unknown): boolean {
   if (!reason || typeof reason !== "object") return false;
-  return (reason as { name?: string }).name === "AbortError";
+  const name = (reason as { name?: string }).name;
+  return name === "AbortError" || name === "TimeoutError";
 }
 
 export async function reverseGeocode(lng: number, lat: number, signal?: AbortSignal): Promise<PlaceResult[]> {
-  try {
-    return await searchNominatim(`${lat}, ${lng}`, 1, signal);
-  } catch {
-    const url = new URL("https://nominatim.openstreetmap.org/reverse");
-    url.searchParams.set("lon", String(lng));
-    url.searchParams.set("lat", String(lat));
-    url.searchParams.set("format", "json");
-    url.searchParams.set("addressdetails", "1");
-    const response = await fetch(url, {
-      headers: {
-        Accept: "application/json",
-        "User-Agent": "navigationApp/0.1 (Israeli walk+transit MVP; local-dev)",
-      },
-      signal,
-    });
-    if (!response.ok) throw new Error(`Nominatim reverse failed (${response.status})`);
-    const item = (await response.json()) as NominatimItem & { error?: string };
-    if (item.error) return [];
-    const normalized = normalizeNominatim(item);
-    return normalized ? [normalized] : [];
-  }
+  const url = new URL("https://nominatim.openstreetmap.org/reverse");
+  url.searchParams.set("lon", String(lng));
+  url.searchParams.set("lat", String(lat));
+  url.searchParams.set("format", "json");
+  url.searchParams.set("addressdetails", "1");
+  url.searchParams.set("zoom", "18");
+
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/json",
+      "User-Agent": NOMINATIM_UA,
+    },
+    signal,
+  });
+  if (!response.ok) throw new Error(`Nominatim reverse failed (${response.status})`);
+  const item = (await response.json()) as NominatimItem & { error?: string };
+  if (item.error) return [];
+  const normalized = normalizeNominatim(item);
+  return normalized ? [normalized] : [];
 }
 
 export function __clearGeocodeCacheForTests(): void {
   searchCache.clear();
+}
+
+/** Test helpers — ranking/refine without network. */
+export function __rankPlacesForTests(places: PlaceResult[], query: string): PlaceResult[] {
+  const parsed = parseAddressQuery(query);
+  return refineResults(
+    dedupe(places)
+      .map((place) => ({ place, score: scorePlace(place, parsed) }))
+      .sort((a, b) => b.score - a.score)
+      .map((x) => x.place),
+    parsed,
+  );
 }
