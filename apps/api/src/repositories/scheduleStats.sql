@@ -1,10 +1,10 @@
 -- $1 text[] stop_ids
--- $2 int hour_start_secs (inclusive)
--- $3 int hour_end_secs (exclusive, may be > 86400 for overnight)
--- $4 int[] days_of_week (0=Sunday .. 6=Saturday); empty = all days
+-- $2 int window_start_secs (inclusive, Israel-local GTFS clock)
+-- $3 int window_end_secs (exclusive; typically start + 3600)
+-- $4 int[] days_of_week (0=Sunday .. 6=Saturday)
 --
--- Route-level headways only (station freq is min of known line headways in the API).
--- DISTINCT deps collapses multi-service duplicate clock times before gap stats.
+-- Fast frequency estimate: buses in the window / 3600s → headway.
+-- headway_secs = 3600 / departure_count  (i.e. minutes ≈ 60 / buses_per_hour)
 WITH active_feed AS (
   SELECT id
   FROM gtfs_feed_versions
@@ -29,10 +29,9 @@ services AS (
      OR (6 = ANY($4) AND c.saturday = 1)
 ),
 deps AS (
-  SELECT DISTINCT
+  SELECT
     st.stop_id,
-    COALESCE(NULLIF(r.route_short_name, ''), r.route_id) AS route_short_name,
-    COALESCE(st.departure_secs, st.arrival_secs) AS dep_secs
+    COALESCE(NULLIF(r.route_short_name, ''), r.route_id) AS route_short_name
   FROM active_feed f
   JOIN gtfs_stop_times st
     ON st.feed_version_id = f.id
@@ -51,34 +50,10 @@ deps AS (
     AND COALESCE(st.departure_secs, st.arrival_secs) < $3
     AND COALESCE(st.pickup_type, 0) <> 1
 ),
-ordered_route AS (
-  SELECT
-    stop_id,
-    route_short_name,
-    dep_secs,
-    lag(dep_secs) OVER (
-      PARTITION BY stop_id, route_short_name
-      ORDER BY dep_secs
-    ) AS prev_dep
+stop_counts AS (
+  SELECT stop_id, COUNT(*)::int AS departure_count
   FROM deps
-),
-route_gaps AS (
-  SELECT
-    stop_id,
-    route_short_name,
-    (dep_secs - prev_dep) AS gap_secs
-  FROM ordered_route
-  WHERE prev_dep IS NOT NULL
-    AND (dep_secs - prev_dep) BETWEEN 60 AND 7200
-),
-route_stats AS (
-  SELECT
-    stop_id,
-    route_short_name,
-    COUNT(*)::int AS sample_count,
-    percentile_cont(0.5) WITHIN GROUP (ORDER BY gap_secs)::float8 AS median_headway_secs
-  FROM route_gaps
-  GROUP BY stop_id, route_short_name
+  GROUP BY stop_id
 ),
 route_counts AS (
   SELECT stop_id, route_short_name, COUNT(*)::int AS departure_count
@@ -86,14 +61,26 @@ route_counts AS (
   GROUP BY stop_id, route_short_name
 )
 SELECT
+  'stop'::text AS kind,
+  s.stop_id,
+  NULL::text AS route_short_name,
+  CASE
+    WHEN s.departure_count > 0 THEN (3600.0 / s.departure_count)
+    ELSE NULL
+  END AS median_headway_secs,
+  s.departure_count AS sample_count,
+  s.departure_count
+FROM stop_counts s
+UNION ALL
+SELECT
   'route'::text AS kind,
   r.stop_id,
   r.route_short_name,
-  r.median_headway_secs,
-  r.sample_count,
-  COALESCE(rc.departure_count, 0) AS departure_count
-FROM route_stats r
-LEFT JOIN route_counts rc
-  ON rc.stop_id = r.stop_id
- AND rc.route_short_name = r.route_short_name
-ORDER BY stop_id, route_short_name;
+  CASE
+    WHEN r.departure_count > 0 THEN (3600.0 / r.departure_count)
+    ELSE NULL
+  END AS median_headway_secs,
+  r.departure_count AS sample_count,
+  r.departure_count
+FROM route_counts r
+ORDER BY kind, stop_id, route_short_name NULLS FIRST;

@@ -6,6 +6,7 @@ import { pool } from "../db.js";
 import { env } from "../config.js";
 import { fetchWalkingIsochrone } from "./orsIsochrone.js";
 import { headwayToBucket } from "./frequency.js";
+import { israelLocalNow } from "./departures.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -93,6 +94,39 @@ function resolveScheduleWindow(request: DirectPlanRequest): {
   return { hoursStart, hoursEnd, daysOfWeek, startSecs, endSecs };
 }
 
+/**
+ * 1-hour sample for the fast headway estimate (buses_in_hour → headway = 3600/count).
+ * Default: the next hour from Israel-local now. With schedule filtering: first hour
+ * of the selected window on the selected days.
+ */
+function resolveFrequencyWindow(request: DirectPlanRequest): {
+  startSecs: number;
+  endSecs: number;
+  daysOfWeek: number[];
+} {
+  if (request.filterBySchedule) {
+    const hoursStart = request.hoursStart ?? 6;
+    const startSecs = Math.max(0, Math.min(23, hoursStart)) * 3600;
+    return {
+      startSecs,
+      endSecs: startSecs + 3600,
+      daysOfWeek:
+        request.daysOfWeek && request.daysOfWeek.length > 0
+          ? [...new Set(request.daysOfWeek)].sort((a, b) => a - b)
+          : [0, 1, 2, 3, 4, 5, 6],
+    };
+  }
+  const { dayOfWeek, nowSecs } = israelLocalNow();
+  let startSecs = nowSecs;
+  let endSecs = nowSecs + 3600;
+  // Stay on today's GTFS clock; near midnight use the last hour of the day.
+  if (endSecs > 86400) {
+    startSecs = 86400 - 3600;
+    endSecs = 86400;
+  }
+  return { startSecs, endSecs, daysOfWeek: [dayOfWeek] };
+}
+
 export async function planDirect(request: DirectPlanRequest, signal?: AbortSignal) {
   const started = Date.now();
   const warnings: string[] = [];
@@ -102,6 +136,7 @@ export async function planDirect(request: DirectPlanRequest, signal?: AbortSigna
     request.mode === "walk_transit" ? request.destination : request.origin;
   const locationType = request.mode === "walk_transit" ? "start" : "destination";
   const schedule = resolveScheduleWindow(request);
+  const frequencyWindow = resolveFrequencyWindow(request);
 
   const maxWalkingSeconds = Math.min(request.maxWalkingSeconds, env.MAX_WALKING_SECONDS);
   if (maxWalkingSeconds !== request.maxWalkingSeconds) {
@@ -153,10 +188,8 @@ export async function planDirect(request: DirectPlanRequest, signal?: AbortSigna
 
   const stopIds = stopsResult.rows.map((row) => row.stop_id);
   let scheduleRows: ScheduleRow[] = [];
-  // Frequency stats scan gtfs_stop_times (~3.5GB). Bound to board/alight ends of
-  // returned routes (+ a small sample of other reachable stops) and cap runtime so
-  // Plan trip cannot hang for minutes. Always compute when possible — headways are
-  // shown even when schedule filtering is off.
+  // Frequency: count departures in a 1-hour window, headway ≈ 3600/count.
+  // Bound to board/alight (+ sample) stops; soft-timeout so Plan trip never hangs.
   const routeStopIds = [
     ...new Set(
       routesResult.rows.flatMap((r) => [r.board_stop_id, r.alight_stop_id]),
@@ -168,12 +201,12 @@ export async function planDirect(request: DirectPlanRequest, signal?: AbortSigna
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
-      await client.query("SET LOCAL statement_timeout = '12000ms'");
+      await client.query("SET LOCAL statement_timeout = '5000ms'");
       const scheduleResult = await client.query<ScheduleRow>(scheduleSql, [
         scheduleStopIds,
-        schedule.startSecs,
-        schedule.endSecs,
-        schedule.daysOfWeek,
+        frequencyWindow.startSecs,
+        frequencyWindow.endSecs,
+        frequencyWindow.daysOfWeek,
       ]);
       await client.query("COMMIT");
       scheduleRows = scheduleResult.rows;
@@ -191,13 +224,14 @@ export async function planDirect(request: DirectPlanRequest, signal?: AbortSigna
   }
 
   const routeHeadway = new Map<string, Map<string, RouteFrequency>>();
+  const stopHeadway = new Map<string, number | null>();
   const activeRoutesByStop = new Map<string, Set<string>>();
 
   for (const row of scheduleRows) {
     const headway =
       row.median_headway_secs == null ? null : Number(row.median_headway_secs);
     if (row.kind === "stop") {
-      // Station frequency is derived from known line headways below.
+      stopHeadway.set(row.stop_id, headway);
       continue;
     }
     if (!row.route_short_name) continue;
@@ -244,7 +278,10 @@ export async function planDirect(request: DirectPlanRequest, signal?: AbortSigna
     const knownHeadways = routeFrequencies
       .map((r) => r.headwaySeconds)
       .filter((h): h is number => h != null && Number.isFinite(h) && h > 0);
-    const headwaySeconds = knownHeadways.length ? Math.min(...knownHeadways) : null;
+    const fromLines = knownHeadways.length ? Math.min(...knownHeadways) : null;
+    const fromStop = stopHeadway.get(row.stop_id);
+    const headwaySeconds =
+      fromStop != null && Number.isFinite(fromStop) && fromStop > 0 ? fromStop : fromLines;
     return {
       stopId: row.stop_id,
       name: row.stop_name,
