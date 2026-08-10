@@ -14,6 +14,9 @@ WITH active_feed AS (
 day_filter AS (
   SELECT COALESCE(cardinality($4::int[]), 0) AS n
 ),
+target_stops AS MATERIALIZED (
+  SELECT DISTINCT unnest($1::text[]) AS stop_id
+),
 services AS (
   SELECT c.feed_version_id, c.service_id
   FROM gtfs_calendar c
@@ -33,9 +36,10 @@ deps AS (
     st.stop_id,
     COALESCE(NULLIF(r.route_short_name, ''), r.route_id) AS route_short_name
   FROM active_feed f
+  JOIN target_stops ts ON true
   JOIN gtfs_stop_times st
     ON st.feed_version_id = f.id
-   AND st.stop_id = ANY($1::text[])
+   AND st.stop_id = ts.stop_id
   JOIN gtfs_trips t
     ON t.feed_version_id = st.feed_version_id
    AND t.trip_id = st.trip_id
@@ -50,37 +54,30 @@ deps AS (
     AND COALESCE(st.departure_secs, st.arrival_secs) < $3
     AND COALESCE(st.pickup_type, 0) <> 1
 ),
-stop_counts AS (
-  SELECT stop_id, COUNT(*)::int AS departure_count
+counts AS (
+  SELECT
+    CASE
+      WHEN GROUPING(route_short_name) = 1 THEN 'stop'::text
+      ELSE 'route'::text
+    END AS kind,
+    stop_id,
+    CASE
+      WHEN GROUPING(route_short_name) = 1 THEN NULL::text
+      ELSE route_short_name
+    END AS route_short_name,
+    COUNT(*)::int AS departure_count
   FROM deps
-  GROUP BY stop_id
-),
-route_counts AS (
-  SELECT stop_id, route_short_name, COUNT(*)::int AS departure_count
-  FROM deps
-  GROUP BY stop_id, route_short_name
+  GROUP BY GROUPING SETS ((stop_id), (stop_id, route_short_name))
 )
 SELECT
-  'stop'::text AS kind,
-  s.stop_id,
-  NULL::text AS route_short_name,
+  c.kind,
+  c.stop_id,
+  c.route_short_name,
   CASE
-    WHEN s.departure_count > 0 THEN (3600.0 / s.departure_count)
+    WHEN c.departure_count > 0 THEN (3600.0 / c.departure_count)
     ELSE NULL
   END AS median_headway_secs,
-  s.departure_count AS sample_count,
-  s.departure_count
-FROM stop_counts s
-UNION ALL
-SELECT
-  'route'::text AS kind,
-  r.stop_id,
-  r.route_short_name,
-  CASE
-    WHEN r.departure_count > 0 THEN (3600.0 / r.departure_count)
-    ELSE NULL
-  END AS median_headway_secs,
-  r.departure_count AS sample_count,
-  r.departure_count
-FROM route_counts r
+  c.departure_count AS sample_count,
+  c.departure_count
+FROM counts c
 ORDER BY kind, stop_id, route_short_name NULLS FIRST;
