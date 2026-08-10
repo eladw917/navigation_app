@@ -10,7 +10,9 @@ area AS (
 endpoint AS (
   SELECT ST_SetSRID(ST_MakePoint($2, $3), 4326) AS geom
 ),
-boarding AS (
+-- Keep the small spatial stop sets fixed. Inlining them lets PostgreSQL choose a
+-- nested-loop plan that repeats spatial filtering while joining stop_times.
+boarding AS MATERIALIZED (
   SELECT s.feed_version_id, s.stop_id, s.stop_name, s.geom
   FROM gtfs_stops s, active_feed f, area a, endpoint e
   WHERE s.feed_version_id = f.id
@@ -20,7 +22,7 @@ boarding AS (
       ELSE ST_DWithin(s.geom::geography, e.geom::geography, $4)
     END
 ),
-alighting AS (
+alighting AS MATERIALIZED (
   SELECT s.feed_version_id, s.stop_id, s.stop_name, s.geom
   FROM gtfs_stops s, active_feed f, area a, endpoint e
   WHERE s.feed_version_id = f.id

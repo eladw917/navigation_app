@@ -10,7 +10,9 @@ area AS (
 endpoint AS (
   SELECT ST_SetSRID(ST_MakePoint($2, $3), 4326) AS geom
 ),
-polygon_stops AS (
+-- PostgreSQL otherwise inlines these small spatial result sets and may rerun the
+-- endpoint lookup inside the stop_times join (millions of needless comparisons).
+polygon_stops AS MATERIALIZED (
   SELECT s.feed_version_id, s.stop_id, s.stop_name, s.geom
   FROM gtfs_stops s
   JOIN active_feed f ON s.feed_version_id = f.id
@@ -18,7 +20,7 @@ polygon_stops AS (
   WHERE COALESCE(s.location_type, 0) = 0
     AND ST_Covers(a.geom, s.geom)
 ),
-endpoint_stops AS (
+endpoint_stops AS MATERIALIZED (
   SELECT s.feed_version_id, s.stop_id, s.stop_name, s.geom
   FROM gtfs_stops s
   JOIN active_feed f ON s.feed_version_id = f.id
