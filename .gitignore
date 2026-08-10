@@ -10,6 +10,7 @@ coverage/
 data/gtfs/
 data/downloads/
 *.zip
+!tests/fixtures/gtfs/fixture.zip
 .venv/
 notebooks/.ipynb_checkpoints/
 __pycache__/
