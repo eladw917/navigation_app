@@ -120,9 +120,66 @@ function fitPaddingForPopup(reservePopup: boolean) {
   return { top: 72, bottom: STATION_POPUP_BOTTOM_PAD, left: 40, right: 40 };
 }
 
+function truncateMapLabel(text: string, max = 36): string {
+  const t = text.trim();
+  if (t.length <= max) return t;
+  return `${t.slice(0, max - 1)}…`;
+}
+
+/** Custom MapLibre marker: pin + Origin/Destination annotation. */
+function createEndpointMarkerElement(
+  kind: "origin" | "destination",
+  label: string | null | undefined,
+): HTMLDivElement {
+  const root = document.createElement("div");
+  root.className = `endpoint-marker endpoint-marker--${kind}`;
+  root.setAttribute("role", "img");
+  root.setAttribute(
+    "aria-label",
+    kind === "origin"
+      ? label?.trim()
+        ? `Origin: ${label.trim()}`
+        : "Origin"
+      : label?.trim()
+        ? `Destination: ${label.trim()}`
+        : "Destination",
+  );
+
+  const pin = document.createElement("div");
+  pin.className = "endpoint-marker-pin";
+  pin.setAttribute("aria-hidden", "true");
+
+  const lab = document.createElement("div");
+  lab.className = "endpoint-marker-label";
+  const role = document.createElement("span");
+  role.className = "endpoint-marker-role";
+  role.textContent = kind === "origin" ? "Origin" : "Destination";
+  lab.appendChild(role);
+  if (label?.trim()) {
+    const name = document.createElement("span");
+    name.className = "endpoint-marker-name";
+    name.textContent = truncateMapLabel(label);
+    lab.appendChild(name);
+  }
+
+  root.appendChild(pin);
+  root.appendChild(lab);
+  return root;
+}
+
+/** Stable option identity — ignore sample/next-departure tripId so card picks don't reload. */
+function selectedOptionKey(route: DirectRoute | null | undefined): string | null {
+  if (!route) return null;
+  const mode = route.planMode ?? "walk_transit";
+  return `${mode}:${route.routeId}:${route.boardStopId}:${route.alightStopId}`;
+}
+
 type Props = {
   origin: LatLng | null;
   destination: LatLng | null;
+  /** Optional place labels shown as map annotations on the endpoint markers. */
+  originLabel?: string | null;
+  destinationLabel?: string | null;
   plan: DirectPlanResponse | null;
   selectedRoute: DirectRoute | null;
   planning?: boolean;
@@ -723,6 +780,8 @@ function headwayForBus(
 export function TransitMap({
   origin,
   destination,
+  originLabel = null,
+  destinationLabel = null,
   plan,
   selectedRoute,
   planning = false,
@@ -745,8 +804,12 @@ export function TransitMap({
   const suppressMapClickRef = useRef(false);
   const originRef = useRef(origin);
   const destinationRef = useRef(destination);
+  const originLabelRef = useRef(originLabel);
+  const destinationLabelRef = useRef(destinationLabel);
   originRef.current = origin;
   destinationRef.current = destination;
+  originLabelRef.current = originLabel;
+  destinationLabelRef.current = destinationLabel;
   onSelectStopRef.current = onSelectStop;
 
   const [browse, setBrowse] = useState<BrowseState | null>(null);
@@ -1288,7 +1351,9 @@ export function TransitMap({
 
     setPathLoading(true);
     setPathError(null);
-    setTripPath(null);
+    // Keep the previous path drawn until the new one arrives so option switching
+    // doesn't blank the route (matches station-tap behavior).
+    fittedPathKey.current = null;
     setBrowse({
       bus,
       buses,
@@ -1558,9 +1623,8 @@ export function TransitMap({
   };
 
   const openedFromCardRef = useRef<string | null>(null);
-  const selectedRouteKey = selectedRoute
-    ? `${selectedRoute.planMode ?? ""}:${selectedRoute.tripId}:${selectedRoute.boardStopId}:${selectedRoute.alightStopId}`
-    : null;
+  // Ignore tripId — next-departure override must not re-open / clear the path.
+  const selectedRouteKey = selectedOptionKey(selectedRoute);
 
   useEffect(() => {
     if (!selectedRoute || !plan || !selectedRouteKey) return;
@@ -1583,16 +1647,27 @@ export function TransitMap({
     const syncMarker = (
       markerRef: { current: maplibregl.Marker | null },
       point: LatLng | null,
-      color: string,
+      kind: "origin" | "destination",
+      label: string | null | undefined,
     ) => {
       if (!isValidLngLat(point)) {
         markerRef.current?.remove();
         markerRef.current = null;
         return;
       }
+      const nextEl = createEndpointMarkerElement(kind, label);
       if (!markerRef.current) {
-        markerRef.current = new maplibregl.Marker({ color });
+        markerRef.current = new maplibregl.Marker({ element: nextEl, anchor: "bottom" });
+      } else {
+        const prev = markerRef.current.getElement();
+        const prevKey = prev?.dataset.endpointKey ?? "";
+        const nextKey = `${kind}:${label ?? ""}`;
+        if (prevKey !== nextKey) {
+          markerRef.current.remove();
+          markerRef.current = new maplibregl.Marker({ element: nextEl, anchor: "bottom" });
+        }
       }
+      markerRef.current.getElement().dataset.endpointKey = `${kind}:${label ?? ""}`;
       // MapLibre requires coordinates before addTo — otherwise it throws and blanks the app.
       markerRef.current.setLngLat([point.lng, point.lat]);
       if (!markerRef.current.getElement().isConnected) {
@@ -1600,8 +1675,13 @@ export function TransitMap({
       }
     };
 
-    syncMarker(originMarkerRef, originRef.current, "#16a34a");
-    syncMarker(destinationMarkerRef, destinationRef.current, "#dc2626");
+    syncMarker(originMarkerRef, originRef.current, "origin", originLabelRef.current);
+    syncMarker(
+      destinationMarkerRef,
+      destinationRef.current,
+      "destination",
+      destinationLabelRef.current,
+    );
   });
 
   const whenMapReady = useRef((fn: () => void) => {
@@ -1905,7 +1985,7 @@ export function TransitMap({
       syncEndpointMarkers.current();
       focusEndpoints.current();
     });
-  }, [origin, destination]);
+  }, [origin, destination, originLabel, destinationLabel]);
 
   useEffect(() => {
     const map = mapRef.current;

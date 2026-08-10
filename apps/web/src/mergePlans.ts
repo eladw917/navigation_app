@@ -269,6 +269,18 @@ export type TotalTimeMaxMinutes = 30 | 45 | 60 | 90;
 
 export const TOTAL_TIME_MAX_OPTIONS: TotalTimeMaxMinutes[] = [30, 45, 60, 90];
 
+/** True when a route's line headway passes the selected max. "all" keeps every route. */
+export function routePassesMaxFrequency(
+  route: Pick<DirectRoute, "headwaySeconds">,
+  maxMinutes: FrequencyMaxMinutes,
+): boolean {
+  if (maxMinutes === "all") return true;
+  const headway = route.headwaySeconds;
+  if (headway == null || !Number.isFinite(headway) || headway <= 0) return false;
+  // "Every N min" = headway at most N minutes.
+  return headway / 60 <= maxMinutes;
+}
+
 /** True when station headway passes the selected max. "all" keeps every station. */
 export function stationPassesMaxFrequency(
   stop: Pick<ValidStop, "headwaySeconds" | "routeFrequencies" | "frequencyBucket">,
@@ -278,10 +290,7 @@ export function stationPassesMaxFrequency(
   const headway =
     stationHeadwayFromLines(stop.routeFrequencies ?? []) ?? stop.headwaySeconds ?? null;
   if (headway == null || !Number.isFinite(headway) || headway <= 0) return false;
-  const minutes = headway / 60;
-  // Match circle buckets: 5/10/20 are exclusive upper bounds; 30 keeps all known (incl. 30+).
-  if (maxMinutes >= 30) return true;
-  return minutes < maxMinutes;
+  return headway / 60 <= maxMinutes;
 }
 
 /**
@@ -491,10 +500,18 @@ export function applyResultFilters(
     routes = dedupeRoutesByBus(routes, filters.origin, filters.destination);
   }
 
+  // Frequency is a per-line property — filter routes, then rebuild pins from survivors.
+  if (filters.maxFrequencyMinutes !== "all") {
+    routes = routes.filter((r) =>
+      routePassesMaxFrequency(r, filters.maxFrequencyMinutes),
+    );
+  }
+
   const byId = new Map<string, ValidStop>();
 
-  if (filters.limitTotalWalk) {
-    // Symmetric: only board + get-off ends of routes that pass the walk cap.
+  // When walk-limited or frequency-filtered, only show ends of surviving routes.
+  // Otherwise keep isochrone stops (exploration) and ensure every route has both pins.
+  if (filters.limitTotalWalk || filters.maxFrequencyMinutes !== "all") {
     for (const stop of stopsFromRoutes(routes)) upsertStop(byId, stop);
   } else {
     for (const stop of fullPlan.validStops) {
@@ -502,19 +519,11 @@ export function applyResultFilters(
       if (!modes.some((m) => modeSet.has(m))) continue;
       upsertStop(byId, stop);
     }
-    // Ensure every listed route has both a green board pin and a red get-off pin.
     for (const stop of stopsFromRoutes(routes)) upsertStop(byId, stop);
   }
 
-  let validStops = [...byId.values()].filter((s) =>
-    stationPassesMaxFrequency(s, filters.maxFrequencyMinutes),
-  );
-  const allowedStopIds = new Set(validStops.map((s) => s.stopId));
-  routes = routes.filter(
-    (r) => allowedStopIds.has(r.boardStopId) && allowedStopIds.has(r.alightStopId),
-  );
-  if (filters.limitTotalWalk) {
-    // Stops were built from routes — drop ends that no longer have a qualifying ride.
+  let validStops = [...byId.values()];
+  if (filters.limitTotalWalk || filters.maxFrequencyMinutes !== "all") {
     const routeStopIds = new Set<string>();
     for (const r of routes) {
       routeStopIds.add(r.boardStopId);

@@ -95,9 +95,9 @@ function resolveScheduleWindow(request: DirectPlanRequest): {
 }
 
 /**
- * 1-hour sample for the fast headway estimate (buses_in_hour → headway = 3600/count).
- * Default: the next hour from Israel-local now. With schedule filtering: first hour
- * of the selected window on the selected days.
+ * Window used for headway estimates and (when filterBySchedule) "has service" filtering.
+ * Default: the next hour from Israel-local now.
+ * With schedule filtering: the full selected hours range on the selected days.
  */
 function resolveFrequencyWindow(request: DirectPlanRequest): {
   startSecs: number;
@@ -106,10 +106,12 @@ function resolveFrequencyWindow(request: DirectPlanRequest): {
 } {
   if (request.filterBySchedule) {
     const hoursStart = request.hoursStart ?? 6;
-    const startSecs = Math.max(0, Math.min(23, hoursStart)) * 3600;
+    const hoursEnd = request.hoursEnd ?? 22;
+    const startHour = Math.max(0, Math.min(23, hoursStart));
+    const endHour = Math.min(24, Math.max(startHour + 1, hoursEnd));
     return {
-      startSecs,
-      endSecs: startSecs + 3600,
+      startSecs: startHour * 3600,
+      endSecs: endHour * 3600,
       daysOfWeek:
         request.daysOfWeek && request.daysOfWeek.length > 0
           ? [...new Set(request.daysOfWeek)].sort((a, b) => a - b)
@@ -196,7 +198,9 @@ export async function planDirect(request: DirectPlanRequest, signal?: AbortSigna
 
   const stopIds = stopsResult.rows.map((row) => row.stop_id);
   let scheduleRows: ScheduleRow[] = [];
-  // Frequency: count departures in a 1-hour window, headway ≈ 3600/count.
+  /** False only when the stats query errors/times out — empty rows still mean "no service". */
+  let scheduleStatsOk = true;
+  // Frequency: count departures in the window → headway = duration/count.
   // Route cards use the boarding stop; map pins use reachable stopIds. Alighting
   // endpoints that are neither are irrelevant and can multiply this query's work.
   const scheduleStopIds = [
@@ -219,6 +223,7 @@ export async function planDirect(request: DirectPlanRequest, signal?: AbortSigna
       await client.query("COMMIT");
       scheduleRows = scheduleResult.rows;
     } catch (err) {
+      scheduleStatsOk = false;
       try {
         await client.query("ROLLBACK");
       } catch {
@@ -257,9 +262,9 @@ export async function planDirect(request: DirectPlanRequest, signal?: AbortSigna
     activeRoutesByStop.set(row.stop_id, active);
   }
 
-  // Only apply schedule-window filtering when we actually got frequency rows.
-  // If stats timed out, keep routes/stops visible with unknown headways.
-  const filterActive = Boolean(request.filterBySchedule) && scheduleRows.length > 0;
+  // Apply schedule-window filtering whenever requested. Empty stats = no service in
+  // the window (hide everything). If the query failed, keep unfiltered results.
+  const filterActive = Boolean(request.filterBySchedule) && scheduleStatsOk;
 
   let validStops: ValidStop[] = stopsResult.rows.map((row) => {
     const routeFreqMap = routeHeadway.get(row.stop_id);

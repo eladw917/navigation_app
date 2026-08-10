@@ -141,7 +141,9 @@ export function ScheduleFilters({ value, onChange }: Props) {
       {hoursOpen ? (
         <div className="schedule-popover" role="dialog" aria-label="Hours filter">
           <p className="schedule-popover-title">Service hours</p>
-          <p className="popup-muted">{hoursLabel}</p>
+          <p className="popup-muted">
+            Only lines with a departure in this window ({hoursLabel})
+          </p>
           <label className="schedule-range">
             <span>From</span>
             <input
@@ -194,7 +196,9 @@ export function ScheduleFilters({ value, onChange }: Props) {
       {daysOpen ? (
         <div className="schedule-popover" role="dialog" aria-label="Days filter">
           <p className="schedule-popover-title">Service days</p>
-          <p className="popup-muted">{daysLabel}</p>
+          <p className="popup-muted">
+            Only lines that run on {daysLabel === "All days" ? "any day" : daysLabel}
+          </p>
           <div className="day-chips">
             {DAY_LABELS.map((day) => (
               <button

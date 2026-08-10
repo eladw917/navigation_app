@@ -51,7 +51,7 @@ export function FilterBar({
 
   const freqOptions: SelectChipOption<string>[] = FREQUENCY_MAX_OPTIONS.map((mins) => ({
     value: String(mins),
-    label: mins === "all" ? "Any" : `Every ${mins} min`,
+    label: mins === "all" ? "Any" : `≤ ${mins} min`,
   }));
 
   const totalOptions: SelectChipOption<string>[] = TOTAL_TIME_MAX_OPTIONS.map((mins) => ({

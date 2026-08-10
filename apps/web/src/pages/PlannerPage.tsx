@@ -698,6 +698,8 @@ export function PlannerPage() {
         <TransitMap
           origin={origin?.location ?? null}
           destination={destination?.location ?? null}
+          originLabel={origin?.label ?? null}
+          destinationLabel={destination?.label ?? null}
           plan={isAdjusting ? plan : null}
           selectedRoute={isAdjusting ? mapSelectedRoute : null}
           planning={loading && !isAdjusting}

@@ -1,10 +1,11 @@
 -- $1 text[] stop_ids
 -- $2 int window_start_secs (inclusive, Israel-local GTFS clock)
--- $3 int window_end_secs (exclusive; typically start + 3600)
+-- $3 int window_end_secs (exclusive)
 -- $4 int[] days_of_week (0=Sunday .. 6=Saturday)
 --
--- Fast frequency estimate: buses in the window / 3600s → headway.
--- headway_secs = 3600 / departure_count  (i.e. minutes ≈ 60 / buses_per_hour)
+-- Fast frequency estimate from departures in the window:
+-- headway_secs = window_duration / departure_count
+-- (for a 1-hour window this is 3600/count ≈ 60/buses_per_hour minutes)
 WITH active_feed AS (
   SELECT id
   FROM gtfs_feed_versions
@@ -74,7 +75,8 @@ SELECT
   c.stop_id,
   c.route_short_name,
   CASE
-    WHEN c.departure_count > 0 THEN (3600.0 / c.departure_count)
+    WHEN c.departure_count > 0 AND ($3::double precision - $2::double precision) > 0
+      THEN (($3::double precision - $2::double precision) / c.departure_count)
     ELSE NULL
   END AS median_headway_secs,
   c.departure_count AS sample_count,
