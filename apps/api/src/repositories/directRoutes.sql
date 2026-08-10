@@ -1,3 +1,12 @@
+-- $1 walking-area GeoJSON
+-- $2/$3 fixed endpoint lng/lat
+-- $4 endpoint radius meters
+-- $5 mode
+-- $6 allowed route types
+-- $7 maximum unique transit lines
+-- $8/$9 origin lng/lat
+-- $10/$11 destination lng/lat
+-- $12 maximum total walking seconds
 WITH active_feed AS (
   SELECT id, imported_at, source_sha256
   FROM gtfs_feed_versions
@@ -55,53 +64,114 @@ connections AS (
    AND a.stop_id = st2.stop_id
   WHERE COALESCE(st1.pickup_type, 0) <> 1
     AND COALESCE(st2.drop_off_type, 0) <> 1
+),
+options AS (
+  SELECT DISTINCT ON (r.route_id, c.board_stop_id, c.alight_stop_id)
+    r.route_id,
+    r.route_short_name,
+    r.route_long_name,
+    r.route_type,
+    t.direction_id,
+    t.trip_headsign,
+    c.trip_id,
+    c.board_stop_id,
+    bs.stop_name AS board_stop_name,
+    ST_X(bs.geom) AS board_lng,
+    ST_Y(bs.geom) AS board_lat,
+    c.alight_stop_id,
+    als.stop_name AS alight_stop_name,
+    ST_X(als.geom) AS alight_lng,
+    ST_Y(als.geom) AS alight_lat,
+    CASE
+      WHEN c.board_secs IS NULL OR c.alight_secs IS NULL THEN NULL
+      ELSE GREATEST(0, c.alight_secs - c.board_secs)
+    END AS ride_duration_seconds,
+    f.id AS feed_version_id,
+    f.imported_at,
+    f.source_sha256
+  FROM connections c
+  JOIN active_feed f ON true
+  JOIN gtfs_trips t
+    ON t.feed_version_id = c.feed_version_id
+   AND t.trip_id = c.trip_id
+  JOIN gtfs_routes r
+    ON r.feed_version_id = t.feed_version_id
+   AND r.route_id = t.route_id
+  JOIN gtfs_stops bs
+    ON bs.feed_version_id = c.feed_version_id
+   AND bs.stop_id = c.board_stop_id
+  JOIN gtfs_stops als
+    ON als.feed_version_id = c.feed_version_id
+   AND als.stop_id = c.alight_stop_id
+  WHERE r.route_type = ANY($6::smallint[])
+  ORDER BY
+    r.route_id,
+    c.board_stop_id,
+    c.alight_stop_id,
+    (c.alight_secs - c.board_secs) ASC NULLS LAST,
+    c.trip_id
+),
+walk_scored AS (
+  SELECT
+    options.*,
+    (
+      ST_Distance(
+          ST_SetSRID(ST_MakePoint(board_lng, board_lat), 4326)::geography,
+          ST_SetSRID(ST_MakePoint($8, $9), 4326)::geography
+        )
+      + ST_Distance(
+          ST_SetSRID(ST_MakePoint(alight_lng, alight_lat), 4326)::geography,
+          ST_SetSRID(ST_MakePoint($10, $11), 4326)::geography
+        )
+    ) / 1.25 AS estimated_walk_seconds
+  FROM options
+),
+scored AS (
+  SELECT
+    walk_scored.*,
+    estimated_walk_seconds
+      + COALESCE(ride_duration_seconds, 0) AS estimated_total_seconds
+  FROM walk_scored
+),
+ranked AS (
+  SELECT
+    scored.*,
+    ROW_NUMBER() OVER (
+      PARTITION BY
+        route_type,
+        COALESCE(NULLIF(route_short_name, ''), route_id)
+      ORDER BY
+        (estimated_walk_seconds > $12),
+        estimated_total_seconds,
+        ride_duration_seconds ASC NULLS LAST,
+        route_id,
+        board_stop_id,
+        alight_stop_id
+    ) AS line_rank
+  FROM scored
 )
-SELECT * FROM (
-SELECT DISTINCT ON (r.route_id, c.board_stop_id, c.alight_stop_id)
-  r.route_id,
-  r.route_short_name,
-  r.route_long_name,
-  r.route_type,
-  t.direction_id,
-  t.trip_headsign,
-  c.trip_id,
-  c.board_stop_id,
-  bs.stop_name AS board_stop_name,
-  ST_X(bs.geom) AS board_lng,
-  ST_Y(bs.geom) AS board_lat,
-  c.alight_stop_id,
-  als.stop_name AS alight_stop_name,
-  ST_X(als.geom) AS alight_lng,
-  ST_Y(als.geom) AS alight_lat,
-  CASE
-    WHEN c.board_secs IS NULL OR c.alight_secs IS NULL THEN NULL
-    ELSE GREATEST(0, c.alight_secs - c.board_secs)
-  END AS ride_duration_seconds,
-  f.id AS feed_version_id,
-  f.imported_at,
-  f.source_sha256
-FROM connections c
-JOIN active_feed f ON true
-JOIN gtfs_trips t
-  ON t.feed_version_id = c.feed_version_id
- AND t.trip_id = c.trip_id
-JOIN gtfs_routes r
-  ON r.feed_version_id = t.feed_version_id
- AND r.route_id = t.route_id
-JOIN gtfs_stops bs
-  ON bs.feed_version_id = c.feed_version_id
- AND bs.stop_id = c.board_stop_id
-JOIN gtfs_stops als
-  ON als.feed_version_id = c.feed_version_id
- AND als.stop_id = c.alight_stop_id
-WHERE r.route_type = ANY($6::smallint[])
-ORDER BY
-  r.route_id,
-  c.board_stop_id,
-  c.alight_stop_id,
-  (c.alight_secs - c.board_secs) ASC NULLS LAST,
-  c.trip_id
-) AS options
+SELECT
+  route_id,
+  route_short_name,
+  route_long_name,
+  route_type,
+  direction_id,
+  trip_headsign,
+  trip_id,
+  board_stop_id,
+  board_stop_name,
+  board_lng,
+  board_lat,
+  alight_stop_id,
+  alight_stop_name,
+  alight_lng,
+  alight_lat,
+  ride_duration_seconds,
+  feed_version_id,
+  imported_at,
+  source_sha256
+FROM ranked
+WHERE line_rank = 1
 ORDER BY
   -- Prefer light rail / train before buses so PLAN_RESULT_LIMIT does not drown them out.
   CASE route_type
@@ -109,7 +179,7 @@ ORDER BY
     WHEN 2 THEN 1
     ELSE 2
   END,
-  ride_duration_seconds ASC NULLS LAST,
+  estimated_total_seconds,
   route_id,
   board_stop_id,
   alight_stop_id

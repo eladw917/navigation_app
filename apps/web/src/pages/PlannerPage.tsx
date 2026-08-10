@@ -375,40 +375,35 @@ export function PlannerPage() {
         daysOfWeek: sched.daysOfWeek,
         filterBySchedule: sched.active,
       };
-      // Walk→Transit first so the UI can unblock; Transit→Walk fills in after.
-      const walkTransit = await planDirect(
-        { ...shared, mode: "walk_transit" },
-        controller.signal,
-      );
+      // Load both directions together so the first rendered map already contains
+      // both walking areas and their pins.
+      const [walkTransit, transitWalk] = await Promise.all([
+        planDirect({ ...shared, mode: "walk_transit" }, controller.signal),
+        planDirect({ ...shared, mode: "transit_walk" }, controller.signal),
+      ]);
       if (controller.signal.aborted) return;
       setCommittedMinutes(minutes);
       setSliderDraft(minutes);
-      setPlansByMode({ walk_transit: walkTransit });
+      setPlansByMode({
+        walk_transit: walkTransit,
+        transit_walk: transitWalk,
+      });
       setEnabledModes([...ALL_MODES]);
       setLimitTotalWalk(true);
       setLimitSoonDepartures(false);
       setMaxFrequencyMinutes("all");
       setMaxTotalTimeMinutes(90);
-      setLoading(false);
-      console.info("[plan] walk_transit ok", {
-        stops: walkTransit.meta.validStopCount,
-        routes: walkTransit.meta.routeCount,
-        elapsedMs: walkTransit.meta.elapsedMs,
-      });
-
-      const transitWalk = await planDirect(
-        { ...shared, mode: "transit_walk" },
-        controller.signal,
-      );
-      if (controller.signal.aborted) return;
-      setPlansByMode({
-        walk_transit: walkTransit,
-        transit_walk: transitWalk,
-      });
-      console.info("[plan] transit_walk ok", {
-        stops: transitWalk.meta.validStopCount,
-        routes: transitWalk.meta.routeCount,
-        elapsedMs: transitWalk.meta.elapsedMs,
+      console.info("[plan] both modes ok", {
+        walkTransit: {
+          stops: walkTransit.meta.validStopCount,
+          routes: walkTransit.meta.routeCount,
+          elapsedMs: walkTransit.meta.elapsedMs,
+        },
+        transitWalk: {
+          stops: transitWalk.meta.validStopCount,
+          routes: transitWalk.meta.routeCount,
+          elapsedMs: transitWalk.meta.elapsedMs,
+        },
       });
     } catch (err) {
       if ((err as Error).name === "AbortError") return;

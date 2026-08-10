@@ -174,7 +174,15 @@ export async function planDirect(request: DirectPlanRequest, signal?: AbortSigna
 
   const [stopsResult, routesResult] = await Promise.all([
     pool.query<StopRow>(reachableSql, [...sharedParams]),
-    pool.query<RouteRow>(routesSql, [...sharedParams, env.PLAN_RESULT_LIMIT]),
+    pool.query<RouteRow>(routesSql, [
+      ...sharedParams,
+      env.PLAN_RESULT_LIMIT,
+      request.origin.lng,
+      request.origin.lat,
+      request.destination.lng,
+      request.destination.lat,
+      maxWalkingSeconds,
+    ]),
   ]);
 
   if (stopsResult.rows.length === 0 && routesResult.rows.length === 0) {
@@ -333,12 +341,6 @@ export async function planDirect(request: DirectPlanRequest, signal?: AbortSigna
       const name = r.routeShortName ?? r.routeId;
       return activeRouteNames.has(name);
     });
-  }
-
-  if (routesResult.rowCount === env.PLAN_RESULT_LIMIT) {
-    warnings.push(
-      `Route list capped at ${env.PLAN_RESULT_LIMIT} options (map pins still show all reachable stops)`,
-    );
   }
 
   const feedMeta = stopsResult.rows[0]

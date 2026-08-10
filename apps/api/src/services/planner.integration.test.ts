@@ -46,11 +46,24 @@ describe("direct route SQL integration", () => {
         "walk_transit",
         [3],
         50,
+        34.7700,
+        32.0750,
+        34.7700,
+        32.0650,
+        900,
       ]);
 
       // Full Israel feed should yield at least one direct option in central TLV.
       // Fixture-only environments may return 0 or 1 depending on coverage.
       assert.ok(Array.isArray(result.rows));
+      const lineKeys = result.rows.map(
+        (row) => `${row.route_type}:${row.route_short_name?.trim() || row.route_id}`,
+      );
+      assert.equal(
+        new Set(lineKeys).size,
+        lineKeys.length,
+        "expected at most one ranked option per transit line",
+      );
       if (Number(feed.rows[0].stop_count) > 100) {
         assert.ok(result.rows.length > 0, "expected routes on the full Israel feed");
         assert.ok(result.rows[0].board_stop_id);

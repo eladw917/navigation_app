@@ -47,6 +47,20 @@ function isValidLngLat(p: LatLng | null | undefined): p is LatLng {
   );
 }
 
+function appendCoordinatePoints(value: unknown, points: LatLng[]): void {
+  if (!Array.isArray(value)) return;
+  if (
+    value.length >= 2 &&
+    typeof value[0] === "number" &&
+    typeof value[1] === "number"
+  ) {
+    const point = { lng: value[0], lat: value[1] };
+    if (isValidLngLat(point)) points.push(point);
+    return;
+  }
+  for (const child of value) appendCoordinatePoints(child, points);
+}
+
 /** Avoid MapLibre world-zoom when padding exceeds the map container size. */
 function safeFitBounds(
   map: MapLibreMap,
@@ -1618,13 +1632,30 @@ export function TransitMap({
         id: "isochrone-fill",
         type: "fill",
         source: "isochrone",
-        paint: { "fill-color": "#0f766e", "fill-opacity": 0.18 },
+        paint: {
+          "fill-color": [
+            "case",
+            ["==", ["get", "planMode"], "transit_walk"],
+            "#b91c1c",
+            "#0f766e",
+          ],
+          "fill-opacity": 0.1,
+        },
       });
       map.addLayer({
         id: "isochrone-line",
         type: "line",
         source: "isochrone",
-        paint: { "line-color": "#0f766e", "line-width": 2 },
+        paint: {
+          "line-color": [
+            "case",
+            ["==", ["get", "planMode"], "transit_walk"],
+            "#b91c1c",
+            "#0f766e",
+          ],
+          "line-width": 1.5,
+          "line-opacity": 0.75,
+        },
       });
 
       map.addSource("route-line", {
@@ -2036,6 +2067,10 @@ export function TransitMap({
           if (Number.isFinite(lng) && Number.isFinite(lat)) {
             points.push({ lng, lat });
           }
+        }
+        for (const feature of plan.isochrone.features ?? []) {
+          const geometry = feature.geometry as { coordinates?: unknown } | undefined;
+          appendCoordinatePoints(geometry?.coordinates, points);
         }
         safeFitBounds(map, points, { maxZoom: 14, duration: 600 });
       }
