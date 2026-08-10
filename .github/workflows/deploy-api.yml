@@ -123,11 +123,7 @@ jobs:
             BASE="${{ secrets.PUBLIC_API_BASE_URL }}"
             body="$(curl -fsS --max-time 20 "${BASE%/}/health")"
             echo "$body"
-            python3 -c '
-import json,sys
-b=json.load(sys.stdin)
-assert b.get("status")=="ok" and b.get("database") is True
-' <<<"$body"
+            python3 -c 'import json,sys; b=json.load(sys.stdin); assert b.get("status")=="ok" and b.get("database") is True' <<<"$body"
           else
             echo "PUBLIC_API_BASE_URL secret unset; relying on remote health check"
           fi
