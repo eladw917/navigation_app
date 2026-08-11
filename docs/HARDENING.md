@@ -15,7 +15,8 @@ EXPLAIN (ANALYZE, BUFFERS)
 
 ## ORS / HeiGIT free-tier guardrails
 
-- Isochrones: cache by rounded anchor + seconds + location_type (already implemented).
+- Isochrones: L1 in-memory LRU + L2 Postgres (`isochrone_cache`, 7-day TTL) by rounded
+  anchor (~11 m) + walking seconds + location_type. Approximated circles are not cached.
 - Do not auto-fire plans on every slider tick in the notebook (Run button only).
 - Monitor dashboard quotas (approx. 500 isochrones / 1000 geocodes per day on Standard).
 - Prefer `api.heigit.org` hosts (legacy `api.openrouteservice.org` shutoff scheduled 2026-08-24).

@@ -1626,13 +1626,19 @@ export function TransitMap({
     if (openedFromCardRef.current === selectedRouteKey) return;
     openedFromCardRef.current = selectedRouteKey;
     const bus = routeBusName(selectedRoute);
-    // Open map popup focused on the boarding (origin-side) station for this option.
+    // Open map path focused on the boarding station for this option.
     void loadTripPathForBus(bus, selectedRoute.boardStopId, [bus], selectedRoute);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- loadTripPathForBus closes over latest plan/endpoints
   }, [selectedRouteKey, plan, selectedRoute]);
 
   useEffect(() => {
-    if (!selectedRouteKey) openedFromCardRef.current = null;
+    if (selectedRouteKey) return;
+    const wasFromCard = openedFromCardRef.current != null;
+    openedFromCardRef.current = null;
+    if (wasFromCard) {
+      fittedPlanId.current = null;
+      clearLineSelection();
+    }
   }, [selectedRouteKey]);
 
   const syncEndpointMarkers = useRef(() => {
@@ -2032,6 +2038,24 @@ export function TransitMap({
         routeLine.setData(
           buildJourneyGeoJson(origin, destination, tripPath, effectiveBoard, effectiveAlight) as never,
         );
+      } else if (isValidLngLat(origin) && isValidLngLat(destination)) {
+        // Browse after resolve: show direct walking path between endpoints.
+        routeLine.setData({
+          type: "FeatureCollection",
+          features: [
+            {
+              type: "Feature",
+              properties: { kind: "walk" },
+              geometry: {
+                type: "LineString",
+                coordinates: [
+                  [origin.lng, origin.lat],
+                  [destination.lng, destination.lat],
+                ],
+              },
+            },
+          ],
+        } as never);
       } else {
         routeLine.setData(EMPTY_LINE);
       }
@@ -2169,14 +2193,13 @@ export function TransitMap({
             tripPath.stops.find((s) => s.stopId === tripPath.alightStopId);
           if (board) points.push({ lng: board.lng, lat: board.lat });
           if (alight) points.push({ lng: alight.lng, lat: alight.lat });
-          if (isValidLngLat(origin)) points.push(origin);
-          if (isValidLngLat(destination)) points.push(destination);
+          // Frame the ride segment so board + alight stay visible (walk O/D may lie outside).
           safeFitBounds(map, points, {
             maxZoom: 14,
             duration: 500,
-            padding: fitPaddingForPopup(true),
+            padding: fitPaddingForPopup(Boolean(!selectedRoute)),
           });
-        } else if (currentStation) {
+        } else if (currentStation && !selectedRoute) {
           const points: LatLng[] = [];
           if (isValidLngLat(origin)) points.push(origin);
           if (isValidLngLat(destination)) points.push(destination);
@@ -2195,23 +2218,14 @@ export function TransitMap({
 
       if (fittedPlanId.current !== plan.requestId) {
         fittedPlanId.current = plan.requestId;
+        // Browse state: zoom out only enough to keep origin + destination in view.
         const points: LatLng[] = [];
         if (isValidLngLat(origin)) points.push(origin);
         if (isValidLngLat(destination)) points.push(destination);
-        for (const f of features) {
-          const [lng, lat] = f.geometry.coordinates;
-          if (Number.isFinite(lng) && Number.isFinite(lat)) {
-            points.push({ lng, lat });
-          }
-        }
-        for (const feature of plan.isochrone.features ?? []) {
-          const geometry = feature.geometry as { coordinates?: unknown } | undefined;
-          appendCoordinatePoints(geometry?.coordinates, points);
-        }
         safeFitBounds(map, points, {
-          maxZoom: 14,
+          maxZoom: 15,
           duration: 600,
-          padding: fitPaddingForPopup(Boolean(browse)),
+          padding: { top: 72, bottom: 96, left: 56, right: 56 },
         });
       }
 
@@ -2297,7 +2311,7 @@ export function TransitMap({
           {pathError}
         </div>
       ) : null}
-      {browse && currentStation ? (
+      {browse && currentStation && !selectedRoute ? (
         <div className="bus-popup" role="dialog" aria-label="Bus station browser">
           <div className="bus-popup-toolbar">
             <div className="bus-popup-buses">

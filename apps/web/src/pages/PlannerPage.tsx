@@ -16,6 +16,7 @@ import {
 import { FilterBar } from "../components/FilterBar";
 import { PlaceInput } from "../components/PlaceInput";
 import { RouteResults } from "../components/RouteResults";
+import { SelectedRoutePanel } from "../components/SelectedRoutePanel";
 import { ScheduleFilters, type ScheduleFilter } from "../components/ScheduleFilters";
 import { TransitMap } from "../components/TransitMap";
 import { Icon } from "../components/ui/Icon";
@@ -41,12 +42,22 @@ import {
 import { pickNextCatchableDeparture } from "../formatDeparture";
 import { rememberPlace } from "../placeHistory";
 import { buildDemoState, isDemoUrl } from "../demo/mockPlan";
+import {
+  matchRouteFromUrl,
+  parsePlanUrl,
+  replacePlanUrl,
+  type PlanUrlRoute,
+  type ParsedPlanUrl,
+} from "../urlState";
 
 type Endpoint = { label: string; location: LatLng } | null;
 
 const ALL_MODES: PlanMode[] = ["walk_transit", "transit_walk"];
 
 const WALK_MINUTE_OPTIONS = [5, 10, 15, 20, 25, 30];
+
+/** Straight-line limit — beyond this, transit planning is not offered. */
+const MAX_PLAN_DISTANCE_METERS = 20_000;
 
 const DEFAULT_SCHEDULE: ScheduleFilter = {
   hoursStart: 6,
@@ -55,9 +66,25 @@ const DEFAULT_SCHEDULE: ScheduleFilter = {
   active: false,
 };
 
+function readInitialShare(): ParsedPlanUrl | null {
+  if (typeof window === "undefined") return null;
+  if (isDemoUrl()) return null;
+  const parsed = parsePlanUrl(window.location.search);
+  if (!parsed.origin && !parsed.destination && !parsed.route) return null;
+  return parsed;
+}
+
 export function PlannerPage() {
-  const [origin, setOrigin] = useState<Endpoint>(null);
-  const [destination, setDestination] = useState<Endpoint>(null);
+  const initialShare = useMemo(() => readInitialShare(), []);
+  const pendingRouteRef = useRef<PlanUrlRoute | null>(initialShare?.route ?? null);
+  const autoPlanFromUrlRef = useRef(
+    Boolean(initialShare?.origin && initialShare?.destination),
+  );
+
+  const [origin, setOrigin] = useState<Endpoint>(() => initialShare?.origin ?? null);
+  const [destination, setDestination] = useState<Endpoint>(
+    () => initialShare?.destination ?? null,
+  );
   /** Modes visible after planning; both on by default. */
   const [enabledModes, setEnabledModes] = useState<PlanMode[]>([...ALL_MODES]);
   /** When on, hide options where walk-to-board or walk-after exceeds max walking time. */
@@ -73,8 +100,10 @@ export function PlannerPage() {
   const [plansByMode, setPlansByMode] = useState<Partial<Record<PlanMode, DirectPlanResponse>>>(
     {},
   );
-  const [sliderDraft, setSliderDraft] = useState(15);
-  const [committedMinutes, setCommittedMinutes] = useState(15);
+  const [sliderDraft, setSliderDraft] = useState(() => initialShare?.walkMinutes ?? 15);
+  const [committedMinutes, setCommittedMinutes] = useState(
+    () => initialShare?.walkMinutes ?? 15,
+  );
   const [schedule, setSchedule] = useState<ScheduleFilter>(DEFAULT_SCHEDULE);
   const [selectedRoute, setSelectedRoute] = useState<DirectRoute | null>(null);
   const [departuresByKey, setDeparturesByKey] = useState<
@@ -109,12 +138,20 @@ export function PlannerPage() {
 
   const isAdjusting = Boolean(fullPlan);
 
+  const odDistanceMeters = useMemo(() => {
+    if (!origin || !destination) return null;
+    return walkEstimateBetween(origin.location, destination.location).meters;
+  }, [origin, destination]);
+
+  const tooFarToPlan =
+    odDistanceMeters != null && odDistanceMeters > MAX_PLAN_DISTANCE_METERS;
+
   /** Straight-line walk preview — only before a plan search starts. */
   const walkPreview = useMemo(() => {
-    if (!origin || !destination) return null;
+    if (odDistanceMeters == null || !origin || !destination) return null;
     if (loading || isAdjusting) return null;
     return walkEstimateBetween(origin.location, destination.location);
-  }, [origin, destination, loading, isAdjusting]);
+  }, [odDistanceMeters, origin, destination, loading, isAdjusting]);
 
   /** Walk / mode / time filters — departures are fetched for these routes. */
   const basePlan = useMemo(
@@ -178,8 +215,10 @@ export function PlannerPage() {
   }, []);
 
   // Default origin to the device location once — user can clear / change it.
+  // Shared URLs that already include an origin skip GPS so the link wins.
   useEffect(() => {
     if (demoMode || origin || !navigator.geolocation) return;
+    if (initialShare?.origin) return;
     let cancelled = false;
     setLocating(true);
     navigator.geolocation.getCurrentPosition(
@@ -248,18 +287,8 @@ export function PlannerPage() {
   }, [loading, isAdjusting, plan, selectedRoute, origin, destination, canPlan]);
 
   const selectedDepartures = selectedKey ? departuresByKey[selectedKey] ?? null : null;
-
-  useEffect(() => {
-    if (!isAdjusting) return;
-    // Filters keep requestId stable — open the sheet so the option list visibly updates.
-    setSheetExpanded(true);
-  }, [
-    isAdjusting,
-    enabledModes,
-    limitTotalWalk,
-    maxFrequencyMinutes,
-    maxTotalTimeMinutes,
-  ]);
+  const sheetDragStartY = useRef<number | null>(null);
+  const sheetDidSwipe = useRef(false);
 
   useEffect(() => {
     if (!selectedRoute || !plan) return;
@@ -271,7 +300,10 @@ export function PlannerPage() {
         r.boardStopId === selectedRoute.boardStopId &&
         r.alightStopId === selectedRoute.alightStopId,
     );
-    if (!stillThere) setSelectedRoute(null);
+    if (!stillThere) {
+      setSelectedRoute(null);
+      setSheetExpanded(false);
+    }
   }, [plan, selectedRoute]);
 
   useEffect(() => {
@@ -400,6 +432,32 @@ export function PlannerPage() {
     setInstancePath(null);
     if (!route) setScheduleExpanded(false);
     setSelectedRoute(route);
+    // Browse: keep options collapsed. Selected: open the line/station card.
+    setSheetExpanded(Boolean(route));
+  }
+
+  function handleSheetTouchStart(clientY: number) {
+    sheetDragStartY.current = clientY;
+    sheetDidSwipe.current = false;
+  }
+
+  function handleSheetTouchEnd(clientY: number) {
+    const start = sheetDragStartY.current;
+    sheetDragStartY.current = null;
+    if (start == null) return;
+    const dy = clientY - start;
+    if (Math.abs(dy) < 40) return;
+    sheetDidSwipe.current = true;
+    if (dy < 0) setSheetExpanded(true);
+    else setSheetExpanded(false);
+  }
+
+  function handleSheetToggleClick() {
+    if (sheetDidSwipe.current) {
+      sheetDidSwipe.current = false;
+      return;
+    }
+    setSheetExpanded((open) => !open);
   }
 
   function handleSelectDeparture(dep: ScheduledDeparture) {
@@ -463,6 +521,9 @@ export function PlannerPage() {
     setSheetExpanded(false);
     if (typeof window !== "undefined") {
       const url = new URL(window.location.href);
+      for (const key of ["o", "d", "ol", "dl", "w", "m", "r", "b", "a"]) {
+        url.searchParams.delete(key);
+      }
       url.searchParams.set("demo", "1");
       window.history.replaceState({}, "", url);
     }
@@ -481,13 +542,55 @@ export function PlannerPage() {
   }
 
   useEffect(() => {
-    if (isDemoUrl()) loadDemo();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on mount when ?demo=1
+    if (isDemoUrl()) {
+      loadDemo();
+      return;
+    }
+    if (autoPlanFromUrlRef.current && origin && destination) {
+      autoPlanFromUrlRef.current = false;
+      const distance = walkEstimateBetween(origin.location, destination.location).meters;
+      if (distance > MAX_PLAN_DISTANCE_METERS) {
+        setError("Shared points are more than 20 km apart");
+        return;
+      }
+      void runPlan(committedMinutes);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- hydrate once from share URL / demo
   }, []);
+
+  /** After a shared-link plan lands, select the route encoded in m/r/b/a. */
+  useEffect(() => {
+    const pending = pendingRouteRef.current;
+    if (!pending || loading || demoMode) return;
+    if (!Object.keys(plansByMode).length) return;
+    const routes = fullPlan?.routes ?? [];
+    const match = matchRouteFromUrl(routes, pending);
+    pendingRouteRef.current = null;
+    if (match) {
+      setSelectedRoute(match);
+      setSheetExpanded(true);
+    }
+  }, [plansByMode, fullPlan, loading, demoMode]);
+
+  /** Keep the address bar in sync so the current trip is shareable. */
+  useEffect(() => {
+    if (demoMode || loading) return;
+    replacePlanUrl({
+      origin,
+      destination,
+      walkMinutes: committedMinutes,
+      route: selectedRoute,
+    });
+  }, [origin, destination, committedMinutes, selectedRoute, demoMode, loading]);
 
   async function runPlan(minutes = committedMinutes, scheduleOverride?: ScheduleFilter) {
     if (!origin || !destination) {
       setError("Choose both origin and destination");
+      return;
+    }
+    const distance = walkEstimateBetween(origin.location, destination.location).meters;
+    if (distance > MAX_PLAN_DISTANCE_METERS) {
+      setError("Choose points within 20 km of each other");
       return;
     }
     if (demoMode) setDemoMode(false);
@@ -596,8 +699,16 @@ export function PlannerPage() {
 
   function startNewQuery() {
     abortRef.current?.abort();
+    departuresAbortRef.current?.abort();
+    instanceAbortRef.current?.abort();
     setPlansByMode({});
     setSelectedRoute(null);
+    setDeparturesByKey({});
+    setDeparturesLoading(false);
+    setDeparturesFetchedSig("");
+    setScheduleExpanded(false);
+    setActiveDeparture(null);
+    setInstancePath(null);
     setError(null);
     setLoading(false);
     setEnabledModes([...ALL_MODES]);
@@ -607,6 +718,16 @@ export function PlannerPage() {
     setMaxTotalTimeMinutes(90);
     setSchedule(DEFAULT_SCHEDULE);
     setSheetExpanded(false);
+    userPickedDepartureRef.current = false;
+    setSliderDraft(committedMinutes);
+  }
+
+  function planNewTrip() {
+    if (demoMode) {
+      exitDemo();
+      return;
+    }
+    startNewQuery();
   }
 
   function handleScheduleChange(next: ScheduleFilter) {
@@ -656,7 +777,7 @@ export function PlannerPage() {
           </button>
         </div>
       ) : null}
-      <header className="top-chrome">
+      <header className={`top-chrome${isAdjusting ? " compact" : ""}`}>
         <div className="app-header">
           <div className="app-brand" aria-label="Walk2Ride">
             <img className="app-logo-icon" src="/logo-icon.png" alt="" aria-hidden />
@@ -665,82 +786,112 @@ export function PlannerPage() {
           {!demoMode && apiOk === false ? <p className="api-pill bad">API offline</p> : null}
         </div>
 
-        <div className="search-card">
-          <div className="search-card-route">
-            <div className="route-rail" aria-hidden>
-              <span className="route-dot origin" />
-              <span className="route-line" />
-              <span className="route-dot destination" />
-            </div>
-            <div className="route-fields">
-              <PlaceInput
-                label="Origin"
-                endpoint="origin"
-                embedded
-                placeholder={locating && !origin ? "Detecting location…" : "Starting point"}
-                valueLabel={origin?.label ?? ""}
-                onSelect={selectOrigin}
-                onClear={clearOrigin}
-              />
-              <div className="route-divider" aria-hidden />
-              <PlaceInput
-                label="Destination"
-                endpoint="destination"
-                embedded
-                placeholder="Destination"
-                valueLabel={destination?.label ?? ""}
-                onSelect={selectDestination}
-                onClear={clearDestination}
-              />
-            </div>
-            <button
-              type="button"
-              className="swap-btn"
-              aria-label="Swap origin and destination"
-              disabled={!origin && !destination}
-              onClick={swapEndpoints}
-            >
-              <Icon name="swap" size={16} />
-            </button>
-          </div>
-
-          {walkPreview ? (
-            <p className="walk-preview" aria-live="polite">
-              <Icon name="walk" size={15} />
-              <span>
-                Walk {formatWalkDistance(walkPreview.meters)}
-                <span className="walk-preview-sep" aria-hidden>
-                  ·
+        {isAdjusting ? (
+          <div className="trip-summary" aria-label="Current trip">
+            <div className="trip-summary-route">
+              <span className="trip-summary-dot origin" aria-hidden />
+              <p className="trip-summary-places">
+                <span className="trip-summary-place">{origin?.label ?? "Origin"}</span>
+                <span className="trip-summary-arrow" aria-hidden>
+                  →
                 </span>
-                ~{walkPreview.minutes} min
+                <span className="trip-summary-place">{destination?.label ?? "Destination"}</span>
+              </p>
+            </div>
+            <div className="trip-summary-meta">
+              <span className="trip-summary-param">
+                <Icon name="walk" size={13} />
+                ≤{committedMinutes} min
               </span>
-            </p>
-          ) : null}
-
-          <div className="search-card-actions">
-            <SelectChip
-              icon="walk"
-              label="Max walk"
-              variant="control"
-              value={String(sliderDraft)}
-              options={WALK_MINUTE_OPTIONS.map((mins) => ({
-                value: String(mins),
-                label: `${mins} min`,
-              }))}
-              onChange={(next) => setSliderDraft(Number(next))}
-            />
-            <button
-              type="button"
-              className="primary"
-              disabled={loading || !canPlan}
-              onClick={() => {
-                void runPlan(sliderDraft);
-              }}
-            >
-              {loading ? "Planning…" : "Plan trip"}
-            </button>
+              <button type="button" className="trip-summary-new" onClick={planNewTrip}>
+                Plan a new trip
+              </button>
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="search-card">
+            <div className="search-card-route">
+              <div className="route-rail" aria-hidden>
+                <span className="route-dot origin" />
+                <span className="route-line" />
+                <span className="route-dot destination" />
+              </div>
+              <div className="route-fields">
+                <PlaceInput
+                  label="Origin"
+                  endpoint="origin"
+                  embedded
+                  placeholder={locating && !origin ? "Detecting location…" : "Starting point"}
+                  valueLabel={origin?.label ?? ""}
+                  onSelect={selectOrigin}
+                  onClear={clearOrigin}
+                />
+                <div className="route-divider" aria-hidden />
+                <PlaceInput
+                  label="Destination"
+                  endpoint="destination"
+                  embedded
+                  placeholder="Destination"
+                  valueLabel={destination?.label ?? ""}
+                  onSelect={selectDestination}
+                  onClear={clearDestination}
+                />
+              </div>
+              <button
+                type="button"
+                className="swap-btn"
+                aria-label="Swap origin and destination"
+                disabled={!origin && !destination}
+                onClick={swapEndpoints}
+              >
+                <Icon name="swap" size={16} />
+              </button>
+            </div>
+
+            {walkPreview ? (
+              <p className="walk-preview" aria-live="polite">
+                <Icon name="walk" size={15} />
+                <span>
+                  Walk {formatWalkDistance(walkPreview.meters)}
+                  <span className="walk-preview-sep" aria-hidden>
+                    ·
+                  </span>
+                  ~{walkPreview.minutes} min
+                </span>
+              </p>
+            ) : null}
+
+            {tooFarToPlan ? (
+              <p className="field-error trip-too-far" role="status">
+                Points are more than 20 km apart — pick a closer destination.
+              </p>
+            ) : null}
+
+            <div className="search-card-actions">
+              <SelectChip
+                icon="walk"
+                label="Max walk"
+                variant="control"
+                value={String(sliderDraft)}
+                options={WALK_MINUTE_OPTIONS.map((mins) => ({
+                  value: String(mins),
+                  label: `${mins} min`,
+                }))}
+                onChange={(next) => setSliderDraft(Number(next))}
+              />
+              <button
+                type="button"
+                className="primary"
+                disabled={loading || !canPlan || tooFarToPlan}
+                onClick={() => {
+                  void runPlan(sliderDraft);
+                }}
+              >
+                {loading ? "Planning…" : "Plan trip"}
+              </button>
+            </div>
+          </div>
+        )}
 
         {error ? (
           <p className="field-error" role="alert">
@@ -750,24 +901,26 @@ export function PlannerPage() {
       </header>
 
       <main className="map-pane">
-        <div className="map-chrome">
-          <FilterBar
-            enabledModes={enabledModes}
-            onModesChange={setEnabledModes}
-            limitTotalWalk={limitTotalWalk}
-            walkLimitMinutes={committedMinutes}
-            onWalkLimitChange={setLimitTotalWalk}
-            maxFrequencyMinutes={maxFrequencyMinutes}
-            onFrequencyChange={setMaxFrequencyMinutes}
-            maxTotalTimeMinutes={maxTotalTimeMinutes}
-            onTotalTimeChange={setMaxTotalTimeMinutes}
-            resultCount={isAdjusting ? (plan?.routes.length ?? 0) : null}
-            disabled={!isAdjusting}
-          />
-          {isAdjusting ? (
-            <ScheduleFilters value={schedule} onChange={handleScheduleChange} />
-          ) : null}
-        </div>
+        {!selectedRoute ? (
+          <div className="map-chrome">
+            <FilterBar
+              enabledModes={enabledModes}
+              onModesChange={setEnabledModes}
+              limitTotalWalk={limitTotalWalk}
+              walkLimitMinutes={committedMinutes}
+              onWalkLimitChange={setLimitTotalWalk}
+              maxFrequencyMinutes={maxFrequencyMinutes}
+              onFrequencyChange={setMaxFrequencyMinutes}
+              maxTotalTimeMinutes={maxTotalTimeMinutes}
+              onTotalTimeChange={setMaxTotalTimeMinutes}
+              resultCount={isAdjusting ? (plan?.routes.length ?? 0) : null}
+              disabled={!isAdjusting}
+            />
+            {isAdjusting ? (
+              <ScheduleFilters value={schedule} onChange={handleScheduleChange} />
+            ) : null}
+          </div>
+        ) : null}
 
         <TransitMap
           origin={origin?.location ?? null}
@@ -782,7 +935,10 @@ export function PlannerPage() {
           maxWalkingSeconds={committedMinutes * 60}
           onOpenSchedule={
             isAdjusting && selectedRoute
-              ? () => setScheduleExpanded(true)
+              ? () => {
+                  setSheetExpanded(true);
+                  setScheduleExpanded(true);
+                }
               : undefined
           }
         />
@@ -801,14 +957,16 @@ export function PlannerPage() {
       </main>
 
       <section
-        className={`route-sheet${sheetExpanded ? " expanded" : " collapsed"}`}
-        aria-label="Route options"
+        className={`route-sheet${sheetExpanded ? " expanded" : " collapsed"}${selectedRoute ? " detail" : ""}`}
+        aria-label={selectedRoute ? "Selected route" : "Route options"}
       >
         <button
           type="button"
           className="route-sheet-toggle"
           aria-expanded={sheetExpanded}
-          onClick={() => setSheetExpanded((open) => !open)}
+          onClick={handleSheetToggleClick}
+          onTouchStart={(e) => handleSheetTouchStart(e.touches[0]?.clientY ?? 0)}
+          onTouchEnd={(e) => handleSheetTouchEnd(e.changedTouches[0]?.clientY ?? 0)}
         >
           <span className="route-sheet-handle" aria-hidden />
           <span className="route-sheet-peek">{sheetPeekLabel}</span>
@@ -816,16 +974,14 @@ export function PlannerPage() {
         </button>
         {sheetExpanded ? (
           <div className="route-sheet-body">
-            {isAdjusting ? (
-              <RouteResults
-                routes={plan?.routes ?? []}
-                selectedId={selectedKey}
-                onSelect={handleSelectRoute}
-                loading={loading}
-                showMode={showModeOnCards}
-                origin={origin?.location ?? null}
-                destination={destination?.location ?? null}
-                departuresByKey={departuresByKey}
+            {isAdjusting && selectedRoute && origin?.location && destination?.location ? (
+              <SelectedRoutePanel
+                route={selectedRoute}
+                origin={origin.location}
+                destination={destination.location}
+                originLabel={origin.label}
+                destinationLabel={destination.label}
+                departures={selectedDepartures}
                 departuresLoading={departuresLoading}
                 scheduleExpanded={scheduleExpanded}
                 onOpenSchedule={() => setScheduleExpanded(true)}
@@ -834,6 +990,19 @@ export function PlannerPage() {
                 onSelectDeparture={handleSelectDeparture}
                 instancePath={instancePath}
                 instanceLoading={instanceLoading}
+                onBack={() => handleSelectRoute(null)}
+                showMode={showModeOnCards}
+              />
+            ) : isAdjusting ? (
+              <RouteResults
+                routes={plan?.routes ?? []}
+                onSelect={(route) => handleSelectRoute(route)}
+                loading={loading}
+                showMode={showModeOnCards}
+                origin={origin?.location ?? null}
+                destination={destination?.location ?? null}
+                departuresByKey={departuresByKey}
+                departuresLoading={departuresLoading}
               />
             ) : (
               <div className="results-panel muted results-empty">

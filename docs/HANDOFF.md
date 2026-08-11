@@ -144,7 +144,7 @@ Place history only caches **coordinates/labels** — not plans.
 
 A Go click still:
 
-1. Runs **two** `POST /v1/plans/direct` (one per mode) — each: ORS isochrone (in-memory LRU ~30 min) + heavy PostGIS + schedule stats.
+1. Runs **two** `POST /v1/plans/direct` (one per mode) — each: ORS isochrone (L1 memory + L2 Postgres, 7-day TTL) + heavy PostGIS + schedule stats.
 2. Then fires **`GET /v1/departures` per route option** (can be many).
 
 Meta line after plan shows `elapsedMs` and `isochrone cached`. Plan-cache / lazy departures were discussed but **not implemented**.

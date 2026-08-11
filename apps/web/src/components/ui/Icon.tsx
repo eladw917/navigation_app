@@ -10,7 +10,8 @@ type IconName =
   | "chevronUp"
   | "swap"
   | "locate"
-  | "leaf";
+  | "leaf"
+  | "share";
 
 type Props = {
   name: IconName;
@@ -64,6 +65,14 @@ const PATHS: Record<IconName, ReactNode> = {
     <>
       <path d="M19 5c0 8-5 12-11 12-1 0-2-.2-3-.6" />
       <path d="M5 19c1-7 6-11 14-14" />
+    </>
+  ),
+  share: (
+    <>
+      <circle cx="18" cy="5" r="2.5" />
+      <circle cx="6" cy="12" r="2.5" />
+      <circle cx="18" cy="19" r="2.5" />
+      <path d="M8.2 10.8 15.8 6.2M8.2 13.2l7.6 4.6" />
     </>
   ),
 };
