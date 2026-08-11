@@ -1694,22 +1694,24 @@ button.popup-bus.unknown-freq.active {
   color: #fff;
 }
 
-/* Origin / destination map annotations */
+/* Origin / destination map annotations — label above pin, offset in JS */
 .endpoint-marker {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.2rem;
+  gap: 0.28rem;
   pointer-events: none;
+  z-index: 1;
 }
 
 .endpoint-marker-pin {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   border-radius: 50% 50% 50% 0;
   transform: rotate(-45deg);
   border: 2px solid #fff;
   box-shadow: 0 1px 4px rgb(15 23 42 / 35%);
+  flex-shrink: 0;
 }
 
 .endpoint-marker--origin .endpoint-marker-pin {
@@ -1722,43 +1724,47 @@ button.popup-bus.unknown-freq.active {
 
 .endpoint-marker-label {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
-  max-width: 11rem;
-  padding: 0.2rem 0.45rem;
-  border-radius: 8px;
-  background: rgb(255 255 255 / 94%);
+  gap: 0.3rem;
+  max-width: 9.5rem;
+  padding: 0.22rem 0.4rem 0.22rem 0.28rem;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 96%);
   border: 1px solid var(--line);
-  box-shadow: 0 1px 3px rgb(15 23 42 / 12%);
-  transform: translateY(2px);
-  text-align: center;
-  line-height: 1.2;
+  box-shadow: 0 2px 8px rgb(15 23 42 / 16%);
+  line-height: 1.15;
 }
 
 .endpoint-marker-role {
-  font-size: 0.65rem;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.15rem;
+  height: 1.15rem;
+  border-radius: 50%;
+  font-size: 0.62rem;
+  font-weight: 800;
+  color: #fff;
+  flex-shrink: 0;
 }
 
 .endpoint-marker--origin .endpoint-marker-role {
-  color: var(--origin);
+  background: var(--origin);
 }
 
 .endpoint-marker--destination .endpoint-marker-role {
-  color: var(--destination);
+  background: var(--destination);
 }
 
 .endpoint-marker-name {
-  margin-top: 0.05rem;
-  font-size: 0.72rem;
-  font-weight: 600;
+  font-size: 0.68rem;
+  font-weight: 650;
   color: var(--ink);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 10.5rem;
+  max-width: 7.5rem;
   direction: rtl;
 }
 

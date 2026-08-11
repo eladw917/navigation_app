@@ -116,17 +116,18 @@ function safeFitBounds(
 }
 
 function fitPaddingForPopup(reservePopup: boolean) {
-  if (!reservePopup) return undefined;
-  return { top: 72, bottom: STATION_POPUP_BOTTOM_PAD, left: 40, right: 40 };
+  // Extra top/side room so O/D label chips stay clear of the frame and station popup.
+  if (!reservePopup) return { top: 56, bottom: 48, left: 56, right: 56 };
+  return { top: 88, bottom: STATION_POPUP_BOTTOM_PAD, left: 56, right: 56 };
 }
 
-function truncateMapLabel(text: string, max = 36): string {
+function truncateMapLabel(text: string, max = 28): string {
   const t = text.trim();
   if (t.length <= max) return t;
   return `${t.slice(0, max - 1)}…`;
 }
 
-/** Custom MapLibre marker: pin + Origin/Destination annotation. */
+/** Custom MapLibre marker: pin + label offset so it clears stops/lines. */
 function createEndpointMarkerElement(
   kind: "origin" | "destination",
   label: string | null | undefined,
@@ -134,36 +135,30 @@ function createEndpointMarkerElement(
   const root = document.createElement("div");
   root.className = `endpoint-marker endpoint-marker--${kind}`;
   root.setAttribute("role", "img");
-  root.setAttribute(
-    "aria-label",
-    kind === "origin"
-      ? label?.trim()
-        ? `Origin: ${label.trim()}`
-        : "Origin"
-      : label?.trim()
-        ? `Destination: ${label.trim()}`
-        : "Destination",
-  );
-
-  const pin = document.createElement("div");
-  pin.className = "endpoint-marker-pin";
-  pin.setAttribute("aria-hidden", "true");
+  const roleText = kind === "origin" ? "Origin" : "Destination";
+  const short = label?.trim() ? truncateMapLabel(label) : null;
+  root.setAttribute("aria-label", short ? `${roleText}: ${label!.trim()}` : roleText);
 
   const lab = document.createElement("div");
   lab.className = "endpoint-marker-label";
   const role = document.createElement("span");
   role.className = "endpoint-marker-role";
-  role.textContent = kind === "origin" ? "Origin" : "Destination";
+  role.textContent = kind === "origin" ? "A" : "B";
   lab.appendChild(role);
-  if (label?.trim()) {
+  if (short) {
     const name = document.createElement("span");
     name.className = "endpoint-marker-name";
-    name.textContent = truncateMapLabel(label);
+    name.textContent = short;
     lab.appendChild(name);
   }
 
-  root.appendChild(pin);
+  const pin = document.createElement("div");
+  pin.className = "endpoint-marker-pin";
+  pin.setAttribute("aria-hidden", "true");
+
+  // Label above pin so it sits away from stop circles and walk dashes.
   root.appendChild(lab);
+  root.appendChild(pin);
   return root;
 }
 
@@ -674,7 +669,7 @@ function buildJourneyGeoJson(
   if (destination && alight) {
     features.push({
       type: "Feature",
-      properties: { kind: "walk" },
+      properties: { kind: "walkAfter" },
       geometry: {
         type: "LineString",
         coordinates: [
@@ -1656,15 +1651,25 @@ export function TransitMap({
         return;
       }
       const nextEl = createEndpointMarkerElement(kind, label);
+      // Fan labels away from the corridor: origin left/up, destination right/up.
+      const offset: [number, number] = kind === "origin" ? [-36, -10] : [36, -10];
       if (!markerRef.current) {
-        markerRef.current = new maplibregl.Marker({ element: nextEl, anchor: "bottom" });
+        markerRef.current = new maplibregl.Marker({
+          element: nextEl,
+          anchor: "bottom",
+          offset,
+        });
       } else {
         const prev = markerRef.current.getElement();
         const prevKey = prev?.dataset.endpointKey ?? "";
         const nextKey = `${kind}:${label ?? ""}`;
         if (prevKey !== nextKey) {
           markerRef.current.remove();
-          markerRef.current = new maplibregl.Marker({ element: nextEl, anchor: "bottom" });
+          markerRef.current = new maplibregl.Marker({
+            element: nextEl,
+            anchor: "bottom",
+            offset,
+          });
         }
       }
       markerRef.current.getElement().dataset.endpointKey = `${kind}:${label ?? ""}`;
@@ -1706,7 +1711,11 @@ export function TransitMap({
     requestAnimationFrame(() => {
       const live = mapRef.current;
       if (!live) return;
-      safeFitBounds(live, points, { maxZoom: 15, duration: 450 });
+      safeFitBounds(live, points, {
+        maxZoom: 15,
+        duration: 450,
+        padding: fitPaddingForPopup(false),
+      });
     });
   });
 
@@ -1793,6 +1802,19 @@ export function TransitMap({
         layout: { "line-cap": "round", "line-join": "round" },
         paint: {
           "line-color": "#16a34a",
+          "line-width": 3.5,
+          "line-opacity": 0.95,
+          "line-dasharray": [1.8, 1.4],
+        },
+      });
+      map.addLayer({
+        id: "route-line-walk-after",
+        type: "line",
+        source: "route-line",
+        filter: ["==", ["get", "kind"], "walkAfter"],
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: {
+          "line-color": "#dc2626",
           "line-width": 3.5,
           "line-opacity": 0.95,
           "line-dasharray": [1.8, 1.4],

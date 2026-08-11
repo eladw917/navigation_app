@@ -20,6 +20,7 @@ import { ScheduleFilters, type ScheduleFilter } from "../components/ScheduleFilt
 import { TransitMap } from "../components/TransitMap";
 import { Icon } from "../components/ui/Icon";
 import { SelectChip } from "../components/ui/SelectChip";
+import { shortPlaceLabel } from "../formatPlace";
 import {
   applyResultFilters,
   filterPlanByCatchableDepartures,
@@ -568,7 +569,9 @@ export function PlannerPage() {
         const location = { lng: pos.coords.longitude, lat: pos.coords.latitude };
         try {
           const { results } = await reversePlace(location);
-          const label = results[0]?.label ?? "Current location";
+          const label = results[0]
+            ? shortPlaceLabel(results[0])
+            : "Current location";
           selectOrigin({ label, location });
         } catch (err) {
           console.error("[reverse]", err);

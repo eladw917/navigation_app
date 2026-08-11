@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { searchPlaces, type LatLng, type PlaceResult } from "../api";
+import { shortPlaceLabel } from "../formatPlace";
 import {
   filterPlaceHistory,
   loadPlaceHistory,
@@ -21,15 +22,6 @@ function isAbortError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
   const name = (err as { name?: string }).name;
   return name === "AbortError" || name === "CanceledError";
-}
-
-function shortPlaceLabel(place: PlaceResult): string {
-  if (place.street && place.housenumber) {
-    return [place.street, place.housenumber, place.city].filter(Boolean).join(" ");
-  }
-  if (place.street && place.city) return `${place.street}, ${place.city}`;
-  const parts = place.label.split(",").map((p) => p.trim()).filter(Boolean);
-  return parts.slice(0, 3).join(", ");
 }
 
 export function PlaceInput({
@@ -258,7 +250,9 @@ export function PlaceInput({
           ) : results.length > 0 ? (
             <>
               <li className="place-results-heading">Search</li>
-              {results.map((r) => (
+              {results.map((r) => {
+                const short = shortPlaceLabel(r);
+                return (
                 <li key={`${r.source}:${r.id}`}>
                   <button
                     type="button"
@@ -268,13 +262,14 @@ export function PlaceInput({
                       pickResult(r);
                     }}
                   >
-                    <strong>{r.label}</strong>
+                    <strong>{short}</strong>
                     <span>
-                      {[r.city, r.street, r.housenumber].filter(Boolean).join(" · ") || r.source}
+                      {r.city && !short.includes(r.city) ? r.city : r.source}
                     </span>
                   </button>
                 </li>
-              ))}
+                );
+              })}
             </>
           ) : null}
         </ul>
