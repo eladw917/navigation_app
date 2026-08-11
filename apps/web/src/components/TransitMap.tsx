@@ -127,7 +127,7 @@ function truncateMapLabel(text: string, max = 28): string {
   return `${t.slice(0, max - 1)}…`;
 }
 
-/** Custom MapLibre marker: pin + label offset so it clears stops/lines. */
+/** Custom MapLibre marker: pin tip on the exact lat/lng; label floats in CSS only. */
 function createEndpointMarkerElement(
   kind: "origin" | "destination",
   label: string | null | undefined,
@@ -156,7 +156,7 @@ function createEndpointMarkerElement(
   pin.className = "endpoint-marker-pin";
   pin.setAttribute("aria-hidden", "true");
 
-  // Label above pin so it sits away from stop circles and walk dashes.
+  // Label is absolutely positioned in CSS so it never shifts the geographic anchor.
   root.appendChild(lab);
   root.appendChild(pin);
   return root;
@@ -1651,28 +1651,26 @@ export function TransitMap({
         return;
       }
       const nextEl = createEndpointMarkerElement(kind, label);
-      // Fan labels away from the corridor: origin left/up, destination right/up.
-      const offset: [number, number] = kind === "origin" ? [-36, -10] : [36, -10];
+      // Pin tip must sit on the true lat/lng at every zoom — never use a screen-pixel
+      // Marker offset (that becomes hundreds of meters when zoomed out).
+      const nextKey = `v2:${kind}:${label ?? ""}`;
       if (!markerRef.current) {
         markerRef.current = new maplibregl.Marker({
           element: nextEl,
           anchor: "bottom",
-          offset,
         });
       } else {
         const prev = markerRef.current.getElement();
         const prevKey = prev?.dataset.endpointKey ?? "";
-        const nextKey = `${kind}:${label ?? ""}`;
         if (prevKey !== nextKey) {
           markerRef.current.remove();
           markerRef.current = new maplibregl.Marker({
             element: nextEl,
             anchor: "bottom",
-            offset,
           });
         }
       }
-      markerRef.current.getElement().dataset.endpointKey = `${kind}:${label ?? ""}`;
+      markerRef.current.getElement().dataset.endpointKey = nextKey;
       // MapLibre requires coordinates before addTo — otherwise it throws and blanks the app.
       markerRef.current.setLngLat([point.lng, point.lat]);
       if (!markerRef.current.getElement().isConnected) {

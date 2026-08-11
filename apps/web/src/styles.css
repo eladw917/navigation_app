@@ -1708,24 +1708,27 @@ button.popup-bus.unknown-freq.active {
   color: #fff;
 }
 
-/* Origin / destination map annotations — label above pin, offset in JS */
+/* Origin / destination: pin tip = map coordinate; label floats in CSS only */
 .endpoint-marker {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.28rem;
+  position: relative;
+  width: 18px;
+  height: 22px;
   pointer-events: none;
   z-index: 1;
 }
 
 .endpoint-marker-pin {
-  width: 16px;
-  height: 16px;
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  width: 14px;
+  height: 14px;
+  margin-left: -7px;
   border-radius: 50% 50% 50% 0;
   transform: rotate(-45deg);
   border: 2px solid #fff;
   box-shadow: 0 1px 4px rgb(15 23 42 / 35%);
-  flex-shrink: 0;
+  background: var(--origin);
 }
 
 .endpoint-marker--origin .endpoint-marker-pin {
@@ -1737,10 +1740,13 @@ button.popup-bus.unknown-freq.active {
 }
 
 .endpoint-marker-label {
+  position: absolute;
+  bottom: calc(100% + 4px);
   display: flex;
   flex-direction: row;
   align-items: center;
   gap: 0.3rem;
+  width: max-content;
   max-width: 9.5rem;
   padding: 0.22rem 0.4rem 0.22rem 0.28rem;
   border-radius: 999px;
@@ -1748,6 +1754,17 @@ button.popup-bus.unknown-freq.active {
   border: 1px solid var(--line);
   box-shadow: 0 2px 8px rgb(15 23 42 / 16%);
   line-height: 1.15;
+}
+
+/* Fan chips away from the corridor without moving the pin */
+.endpoint-marker--origin .endpoint-marker-label {
+  right: 50%;
+  margin-right: 0.15rem;
+}
+
+.endpoint-marker--destination .endpoint-marker-label {
+  left: 50%;
+  margin-left: 0.15rem;
 }
 
 .endpoint-marker-role {
