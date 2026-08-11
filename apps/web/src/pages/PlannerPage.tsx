@@ -25,6 +25,7 @@ import {
   applyResultFilters,
   filterPlanByCatchableDepartures,
   filterPlanByModes,
+  formatWalkDistance,
   FREQUENCY_MAX_OPTIONS,
   modeLabel,
   roundedWalkSeconds,
@@ -32,6 +33,7 @@ import {
   routeOptionKey,
   totalJourneySeconds,
   TOTAL_TIME_MAX_OPTIONS,
+  walkEstimateBetween,
   walkLegsSeconds,
   type FrequencyMaxMinutes,
   type TotalTimeMaxMinutes,
@@ -106,6 +108,13 @@ export function PlannerPage() {
   );
 
   const isAdjusting = Boolean(fullPlan);
+
+  /** Straight-line walk preview — only before a plan search starts. */
+  const walkPreview = useMemo(() => {
+    if (!origin || !destination) return null;
+    if (loading || isAdjusting) return null;
+    return walkEstimateBetween(origin.location, destination.location);
+  }, [origin, destination, loading, isAdjusting]);
 
   /** Walk / mode / time filters — departures are fetched for these routes. */
   const basePlan = useMemo(
@@ -694,6 +703,19 @@ export function PlannerPage() {
               <Icon name="swap" size={16} />
             </button>
           </div>
+
+          {walkPreview ? (
+            <p className="walk-preview" aria-live="polite">
+              <Icon name="walk" size={15} />
+              <span>
+                Walk {formatWalkDistance(walkPreview.meters)}
+                <span className="walk-preview-sep" aria-hidden>
+                  ·
+                </span>
+                ~{walkPreview.minutes} min
+              </span>
+            </p>
+          ) : null}
 
           <div className="search-card-actions">
             <SelectChip

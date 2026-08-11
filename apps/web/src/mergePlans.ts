@@ -206,6 +206,27 @@ export function walkSecondsBetween(
   return haversineMeters(a, b) / WALK_SPEED_MPS;
 }
 
+/** Straight-line walk estimate between two points (same speed as journey walks). */
+export function walkEstimateBetween(
+  a: { lng: number; lat: number },
+  b: { lng: number; lat: number },
+): { meters: number; seconds: number; minutes: number } {
+  const meters = haversineMeters(a, b);
+  const seconds = meters / WALK_SPEED_MPS;
+  return {
+    meters,
+    seconds,
+    minutes: walkMinutesDisplayed(seconds),
+  };
+}
+
+export function formatWalkDistance(meters: number): string {
+  if (!Number.isFinite(meters) || meters < 0) return "—";
+  if (meters < 1000) return `${Math.max(10, Math.round(meters / 10) * 10)} m`;
+  const km = meters / 1000;
+  return `${km >= 10 ? km.toFixed(0) : km.toFixed(1)} km`;
+}
+
 /** Walk to board and walk after alight, each in seconds. */
 export function walkLegsSeconds(
   route: DirectRoute,
