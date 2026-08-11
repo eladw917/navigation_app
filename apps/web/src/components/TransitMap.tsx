@@ -185,6 +185,10 @@ type Props = {
   /** When set with limitWalk, stepper cannot pick stops beyond this walk budget (seconds). */
   maxWalkingSeconds?: number | null;
   limitWalk?: boolean;
+  /** Fired when a line is opened/closed from the map (station tap or clear). */
+  onLineActiveChange?: (active: boolean) => void;
+  /** Fired when map browse resolves to a plan route (or clears). */
+  onBrowseRouteChange?: (route: DirectRoute | null) => void;
 };
 
 type Station = ValidStop & { distanceMeters: number };
@@ -617,18 +621,38 @@ function buildJourneyGeoJson(
     [...tripPath.stops].reverse().find((s) => s.onPath);
   const features: object[] = [];
 
-  if (origin && board) {
+  const pushWalkLeg = (
+    kind: "walk" | "walkAfter",
+    from: { lng: number; lat: number },
+    to: { lng: number; lat: number },
+  ) => {
     features.push({
       type: "Feature",
-      properties: { kind: "walk" },
+      properties: { kind },
       geometry: {
         type: "LineString",
         coordinates: [
-          [origin.lng, origin.lat],
-          [board.lng, board.lat],
+          [from.lng, from.lat],
+          [to.lng, to.lat],
         ],
       },
     });
+    // Solid caps so dashed walk lines visually meet O/D pins and stop circles.
+    const endKind = kind === "walk" ? "walkEnd" : "walkAfterEnd";
+    for (const point of [from, to]) {
+      features.push({
+        type: "Feature",
+        properties: { kind: endKind },
+        geometry: {
+          type: "Point",
+          coordinates: [point.lng, point.lat],
+        },
+      });
+    }
+  };
+
+  if (origin && board) {
+    pushWalkLeg("walk", origin, { lng: board.lng, lat: board.lat });
   }
 
   // Prefer full trip stop coordinates so pre-board / post-alight picks still work.
@@ -667,20 +691,57 @@ function buildJourneyGeoJson(
   }
 
   if (destination && alight) {
-    features.push({
-      type: "Feature",
-      properties: { kind: "walkAfter" },
-      geometry: {
-        type: "LineString",
-        coordinates: [
-          [alight.lng, alight.lat],
-          [destination.lng, destination.lat],
-        ],
-      },
-    });
+    pushWalkLeg("walkAfter", { lng: alight.lng, lat: alight.lat }, destination);
   }
 
   return { type: "FeatureCollection", features };
+}
+
+function buildOdWalkGeoJson(
+  origin: LatLng,
+  destination: LatLng,
+): { type: "FeatureCollection"; features: object[] } {
+  return {
+    type: "FeatureCollection",
+    features: [
+      {
+        type: "Feature",
+        properties: { kind: "walk" },
+        geometry: {
+          type: "LineString",
+          coordinates: [
+            [origin.lng, origin.lat],
+            [destination.lng, destination.lat],
+          ],
+        },
+      },
+      {
+        type: "Feature",
+        properties: { kind: "walkEnd" },
+        geometry: { type: "Point", coordinates: [origin.lng, origin.lat] },
+      },
+      {
+        type: "Feature",
+        properties: { kind: "walkEnd" },
+        geometry: {
+          type: "Point",
+          coordinates: [destination.lng, destination.lat],
+        },
+      },
+    ],
+  };
+}
+
+function walkMinutesBetween(a: LatLng, b: LatLng): number {
+  return Math.max(1, Math.round(haversineMeters(a, b) / WALK_SPEED_MPS / 60));
+}
+
+function createWalkLineLabelElement(minutes: number): HTMLDivElement {
+  const root = document.createElement("div");
+  root.className = "walk-line-label";
+  root.setAttribute("role", "status");
+  root.innerHTML = `<span class="walk-line-label-icon" aria-hidden="true"></span><span>~${minutes} min</span>`;
+  return root;
 }
 
 function tripStopsToLineStations(
@@ -785,13 +846,18 @@ export function TransitMap({
   onOpenSchedule,
   maxWalkingSeconds = null,
   limitWalk = false,
+  onLineActiveChange,
+  onBrowseRouteChange,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const originMarkerRef = useRef<maplibregl.Marker | null>(null);
   const destinationMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const walkLabelMarkerRef = useRef<maplibregl.Marker | null>(null);
   const browseRef = useRef<BrowseState | null>(null);
   const onSelectStopRef = useRef(onSelectStop);
+  const onLineActiveChangeRef = useRef(onLineActiveChange);
+  const onBrowseRouteChangeRef = useRef(onBrowseRouteChange);
   const openBrowseRef = useRef<(stopId: string, buses: string[]) => void>(() => undefined);
   const selectLineStopRef = useRef<(stopId: string) => boolean>(() => false);
   const pathAbortRef = useRef<AbortController | null>(null);
@@ -806,6 +872,8 @@ export function TransitMap({
   originLabelRef.current = originLabel;
   destinationLabelRef.current = destinationLabel;
   onSelectStopRef.current = onSelectStop;
+  onLineActiveChangeRef.current = onLineActiveChange;
+  onBrowseRouteChangeRef.current = onBrowseRouteChange;
 
   const [browse, setBrowse] = useState<BrowseState | null>(null);
   browseRef.current = browse;
@@ -1288,6 +1356,8 @@ export function TransitMap({
     setPopupDeparturesLoading(false);
     fittedPathKey.current = null;
     onSelectStopRef.current?.(null);
+    onLineActiveChangeRef.current?.(false);
+    onBrowseRouteChangeRef.current?.(null);
   }
 
   function focusScrollEnd(end: ScrollEnd) {
@@ -1359,6 +1429,11 @@ export function TransitMap({
       chosenAlightId: null,
     });
     if (preferredStopId) onSelectStopRef.current?.(preferredStopId);
+    onLineActiveChangeRef.current?.(true);
+    if (route) {
+      openedFromCardRef.current = selectedOptionKey(route);
+      onBrowseRouteChangeRef.current?.(route);
+    }
 
     const routeMode =
       route?.planMode ??
@@ -1693,6 +1768,53 @@ export function TransitMap({
     );
   });
 
+  /** Pre-plan only: dashed O↔D walk path + time chip on the midpoint. */
+  const syncWalkPreview = useRef((showLabel: boolean) => {
+    const map = mapRef.current;
+    if (!map) return;
+    const originPoint = originRef.current;
+    const destinationPoint = destinationRef.current;
+    const routeLine = map.getSource("route-line") as GeoJSONSource | undefined;
+    const canDraw =
+      isValidLngLat(originPoint) && isValidLngLat(destinationPoint);
+
+    if (!canDraw) {
+      routeLine?.setData(EMPTY_LINE);
+      walkLabelMarkerRef.current?.remove();
+      walkLabelMarkerRef.current = null;
+      return;
+    }
+
+    routeLine?.setData(buildOdWalkGeoJson(originPoint, destinationPoint) as never);
+
+    if (!showLabel) {
+      walkLabelMarkerRef.current?.remove();
+      walkLabelMarkerRef.current = null;
+      return;
+    }
+
+    const minutes = walkMinutesBetween(originPoint, destinationPoint);
+    const mid: [number, number] = [
+      (originPoint.lng + destinationPoint.lng) / 2,
+      (originPoint.lat + destinationPoint.lat) / 2,
+    ];
+    const nextKey = `walk:${minutes}:${mid[0].toFixed(5)},${mid[1].toFixed(5)}`;
+    const prevKey = walkLabelMarkerRef.current?.getElement()?.dataset.walkLabelKey ?? "";
+    if (!walkLabelMarkerRef.current || prevKey !== nextKey) {
+      walkLabelMarkerRef.current?.remove();
+      const el = createWalkLineLabelElement(minutes);
+      el.dataset.walkLabelKey = nextKey;
+      walkLabelMarkerRef.current = new maplibregl.Marker({
+        element: el,
+        anchor: "center",
+      })
+        .setLngLat(mid)
+        .addTo(map);
+    } else {
+      walkLabelMarkerRef.current.setLngLat(mid);
+    }
+  });
+
   const whenMapReady = useRef((fn: () => void) => {
     const map = mapRef.current;
     if (!map) return;
@@ -1824,6 +1946,30 @@ export function TransitMap({
           "line-dasharray": [1.8, 1.4],
         },
       });
+      map.addLayer({
+        id: "route-line-walk-ends",
+        type: "circle",
+        source: "route-line",
+        filter: ["==", ["get", "kind"], "walkEnd"],
+        paint: {
+          "circle-radius": 3.25,
+          "circle-color": "#16a34a",
+          "circle-stroke-width": 1.5,
+          "circle-stroke-color": "#fff",
+        },
+      });
+      map.addLayer({
+        id: "route-line-walk-after-ends",
+        type: "circle",
+        source: "route-line",
+        filter: ["==", ["get", "kind"], "walkAfterEnd"],
+        paint: {
+          "circle-radius": 3.25,
+          "circle-color": "#dc2626",
+          "circle-stroke-width": 1.5,
+          "circle-stroke-color": "#fff",
+        },
+      });
 
       map.addSource("stops", {
         type: "geojson",
@@ -1913,6 +2059,10 @@ export function TransitMap({
       map.moveLayer("route-line-transit");
       map.moveLayer("route-line-walk");
       if (map.getLayer("route-line-walk-after")) map.moveLayer("route-line-walk-after");
+      if (map.getLayer("route-line-walk-ends")) map.moveLayer("route-line-walk-ends");
+      if (map.getLayer("route-line-walk-after-ends")) {
+        map.moveLayer("route-line-walk-after-ends");
+      }
       map.moveLayer("stops-circle");
 
       map.on("mouseenter", "stops-circle", () => {
@@ -1999,27 +2149,31 @@ export function TransitMap({
     const clearPlanLayers = () => {
       const iso = map.getSource("isochrone") as GeoJSONSource | undefined;
       const stops = map.getSource("stops") as GeoJSONSource | undefined;
-      const routeLine = map.getSource("route-line") as GeoJSONSource | undefined;
       iso?.setData({ type: "FeatureCollection", features: [] });
       stops?.setData({ type: "FeatureCollection", features: [] });
-      routeLine?.setData(EMPTY_LINE);
-      // Re-assert endpoints after source updates (style may briefly be "not loaded").
+      // Keep / draw the pre-plan walking path between selected endpoints.
+      syncWalkPreview.current(true);
       whenMapReady.current(() => syncEndpointMarkers.current());
     };
 
     if (!plan) {
       whenMapReady.current(clearPlanLayers);
+    } else {
+      // Planned results own the route-line source; hide the pre-plan time chip.
+      walkLabelMarkerRef.current?.remove();
+      walkLabelMarkerRef.current = null;
     }
-  }, [plan]);
+  }, [plan, origin, destination]);
 
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
     whenMapReady.current(() => {
       syncEndpointMarkers.current();
+      if (!plan) syncWalkPreview.current(true);
       focusEndpoints.current();
     });
-  }, [origin, destination, originLabel, destinationLabel]);
+  }, [origin, destination, originLabel, destinationLabel, plan]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -2040,22 +2194,7 @@ export function TransitMap({
         );
       } else if (isValidLngLat(origin) && isValidLngLat(destination)) {
         // Browse after resolve: show direct walking path between endpoints.
-        routeLine.setData({
-          type: "FeatureCollection",
-          features: [
-            {
-              type: "Feature",
-              properties: { kind: "walk" },
-              geometry: {
-                type: "LineString",
-                coordinates: [
-                  [origin.lng, origin.lat],
-                  [destination.lng, destination.lat],
-                ],
-              },
-            },
-          ],
-        } as never);
+        routeLine.setData(buildOdWalkGeoJson(origin, destination) as never);
       } else {
         routeLine.setData(EMPTY_LINE);
       }

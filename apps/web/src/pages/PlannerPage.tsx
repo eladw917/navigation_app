@@ -26,7 +26,6 @@ import {
   applyResultFilters,
   filterPlanByCatchableDepartures,
   filterPlanByModes,
-  formatWalkDistance,
   FREQUENCY_MAX_OPTIONS,
   modeLabel,
   roundedWalkSeconds,
@@ -122,6 +121,7 @@ export function PlannerPage() {
   const [apiOk, setApiOk] = useState<boolean | null>(null);
   const [demoMode, setDemoMode] = useState(() => isDemoUrl());
   const [sheetExpanded, setSheetExpanded] = useState(false);
+  const [mapLineActive, setMapLineActive] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const departuresAbortRef = useRef<AbortController | null>(null);
   const instanceAbortRef = useRef<AbortController | null>(null);
@@ -145,13 +145,6 @@ export function PlannerPage() {
 
   const tooFarToPlan =
     odDistanceMeters != null && odDistanceMeters > MAX_PLAN_DISTANCE_METERS;
-
-  /** Straight-line walk preview — only before a plan search starts. */
-  const walkPreview = useMemo(() => {
-    if (odDistanceMeters == null || !origin || !destination) return null;
-    if (loading || isAdjusting) return null;
-    return walkEstimateBetween(origin.location, destination.location);
-  }, [odDistanceMeters, origin, destination, loading, isAdjusting]);
 
   /** Walk / mode / time filters — departures are fetched for these routes. */
   const basePlan = useMemo(
@@ -434,6 +427,23 @@ export function PlannerPage() {
     setSelectedRoute(route);
     // Browse: keep options collapsed. Selected: open the line/station card.
     setSheetExpanded(Boolean(route));
+    if (!route) setMapLineActive(false);
+  }
+
+  function handleBrowseRoute(route: DirectRoute | null) {
+    if (!route) {
+      // Map cleared the line (empty map click / filter drop).
+      setSelectedRoute(null);
+      setScheduleExpanded(false);
+      setActiveDeparture(null);
+      setInstancePath(null);
+      setSheetExpanded(false);
+      return;
+    }
+    setSelectedRoute((prev) =>
+      prev && routeOptionKey(prev) === routeOptionKey(route) ? prev : route,
+    );
+    setSheetExpanded(true);
   }
 
   function handleSheetTouchStart(clientY: number) {
@@ -718,6 +728,7 @@ export function PlannerPage() {
     setMaxTotalTimeMinutes(90);
     setSchedule(DEFAULT_SCHEDULE);
     setSheetExpanded(false);
+    setMapLineActive(false);
     userPickedDepartureRef.current = false;
     setSliderDraft(committedMinutes);
   }
@@ -848,19 +859,6 @@ export function PlannerPage() {
               </button>
             </div>
 
-            {walkPreview ? (
-              <p className="walk-preview" aria-live="polite">
-                <Icon name="walk" size={15} />
-                <span>
-                  Walk {formatWalkDistance(walkPreview.meters)}
-                  <span className="walk-preview-sep" aria-hidden>
-                    ·
-                  </span>
-                  ~{walkPreview.minutes} min
-                </span>
-              </p>
-            ) : null}
-
             {tooFarToPlan ? (
               <p className="field-error trip-too-far" role="status">
                 Points are more than 20 km apart — pick a closer destination.
@@ -901,7 +899,7 @@ export function PlannerPage() {
       </header>
 
       <main className="map-pane">
-        {!selectedRoute ? (
+        {!selectedRoute && !mapLineActive ? (
           <div className="map-chrome">
             <FilterBar
               enabledModes={enabledModes}
@@ -933,6 +931,8 @@ export function PlannerPage() {
           overrideDeparture={activeDeparture}
           limitWalk={limitTotalWalk}
           maxWalkingSeconds={committedMinutes * 60}
+          onLineActiveChange={setMapLineActive}
+          onBrowseRouteChange={handleBrowseRoute}
           onOpenSchedule={
             isAdjusting && selectedRoute
               ? () => {
