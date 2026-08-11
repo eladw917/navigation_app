@@ -26,7 +26,7 @@ type Props = {
 };
 
 const MODE_OPTIONS: SelectChipOption<ModeChoice>[] = [
-  { value: "both", label: "Transit + Walk" },
+  { value: "both", label: "Both modes" },
   { value: "walk_transit", label: "Walk → Transit" },
   { value: "transit_walk", label: "Transit → Walk" },
 ];
@@ -48,8 +48,8 @@ export function FilterBar({
     enabledModes.length === 1 ? (enabledModes[0] ?? "both") : "both";
 
   const walkOptions: SelectChipOption<"any" | "limit">[] = [
-    { value: "limit", label: `${walkLimitMinutes} min` },
-    { value: "any", label: "Any" },
+    { value: "limit", label: `≤ ${walkLimitMinutes} min` },
+    { value: "any", label: "Any walk" },
   ];
 
   const freqOptions: SelectChipOption<string>[] = FREQUENCY_MAX_OPTIONS.map((mins) => ({
@@ -76,7 +76,7 @@ export function FilterBar({
       />
       <SelectChip
         icon="walk"
-        label="Walk limit"
+        label="Total walk"
         value={limitTotalWalk ? "limit" : "any"}
         options={walkOptions}
         disabled={disabled}

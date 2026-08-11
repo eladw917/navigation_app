@@ -32,7 +32,7 @@ input {
 
 .top-chrome {
   flex: 0 0 auto;
-  z-index: 6;
+  z-index: 40;
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
@@ -94,6 +94,8 @@ input {
 /* ——— Search card ——— */
 
 .search-card {
+  position: relative;
+  z-index: 1;
   border-radius: 18px;
   background: var(--surface);
   border: 1px solid rgba(26, 39, 68, 0.07);
@@ -401,7 +403,7 @@ input {
   position: absolute;
   top: var(--space-2);
   inset-inline: var(--space-2);
-  z-index: 20;
+  z-index: 15;
   display: flex;
   align-items: flex-start;
   gap: var(--space-2);
@@ -475,11 +477,11 @@ input {
 }
 
 .place-input:focus-within {
-  z-index: 8;
+  z-index: 50;
 }
 
 .place-input.embedded:focus-within {
-  z-index: 12;
+  z-index: 50;
 }
 
 .place-input label {
@@ -631,7 +633,7 @@ input {
   left: 0;
   right: 0;
   top: calc(100% + 0.35rem);
-  z-index: 20;
+  z-index: 60;
   margin: 0;
   padding: 0.35rem 0;
   list-style: none;

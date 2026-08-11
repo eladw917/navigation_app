@@ -168,6 +168,42 @@ export function PlannerPage() {
       });
   }, []);
 
+  // Default origin to the device location once — user can clear / change it.
+  useEffect(() => {
+    if (demoMode || origin || !navigator.geolocation) return;
+    let cancelled = false;
+    setLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        if (cancelled) return;
+        const location = { lng: pos.coords.longitude, lat: pos.coords.latitude };
+        try {
+          const { results } = await reversePlace(location);
+          if (cancelled) return;
+          const label = results[0] ? shortPlaceLabel(results[0]) : "Current location";
+          selectOrigin({ label, location });
+        } catch (err) {
+          if (cancelled) return;
+          console.error("[reverse]", err);
+          selectOrigin({ label: "Current location", location });
+        } finally {
+          if (!cancelled) setLocating(false);
+        }
+      },
+      (err) => {
+        if (cancelled) return;
+        console.warn("[geolocation]", err);
+        // Leave origin empty so the user can pick a starting point.
+        setLocating(false);
+      },
+      { enableHighAccuracy: true, timeout: 10000 },
+    );
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once on mount / demo exit
+  }, [demoMode]);
+
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
@@ -632,7 +668,7 @@ export function PlannerPage() {
                 label="Origin"
                 endpoint="origin"
                 embedded
-                placeholder="Starting point"
+                placeholder={locating && !origin ? "Detecting location…" : "Starting point"}
                 valueLabel={origin?.label ?? ""}
                 onSelect={selectOrigin}
                 onClear={clearOrigin}

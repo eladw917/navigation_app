@@ -46,11 +46,15 @@ export function PlaceInput({
   const editingRef = useRef(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
 
-  // Sync filter from in-memory history — localStorage read only on open/save.
-  const cachedMatches = useMemo(
-    () => filterPlaceHistory(historyFilter, history),
-    [historyFilter, history],
-  );
+  // Only show recent rows that match what the user typed (never an empty Recent block).
+  const cachedMatches = useMemo(() => {
+    const q = historyFilter.trim();
+    if (!q) return [];
+    return filterPlaceHistory(q, history);
+  }, [historyFilter, history]);
+
+  const showMenu =
+    open && (cachedMatches.length > 0 || loading || results.length > 0 || Boolean(error));
 
   useEffect(() => {
     if (editingRef.current) return;
@@ -76,26 +80,16 @@ export function PlaceInput({
     };
   }, []);
 
-  /** Open recent list immediately from memory / localStorage — no network. */
-  function openHistoryMenu(filter: string) {
-    abortRef.current?.abort();
-    requestIdRef.current += 1;
-    if (debounceRef.current) {
-      window.clearTimeout(debounceRef.current);
-      debounceRef.current = null;
-    }
-    setLoading(false);
-    setResults([]);
-    setError(null);
-    setHistory(loadPlaceHistory());
-    setHistoryFilter(filter);
-    setOpen(true);
-  }
-
   function runSearch(text: string) {
     const trimmed = text.trim();
     if (!trimmed) {
-      openHistoryMenu("");
+      abortRef.current?.abort();
+      requestIdRef.current += 1;
+      setLoading(false);
+      setResults([]);
+      setError(null);
+      setHistoryFilter("");
+      setOpen(false);
       return;
     }
 
@@ -104,9 +98,9 @@ export function PlaceInput({
     abortRef.current = controller;
     const requestId = ++requestIdRef.current;
 
-    // Keep Recent visible; only the Search section waits on the network.
     setLoading(true);
     setError(null);
+    setHistory(loadPlaceHistory());
     setHistoryFilter(trimmed);
     setOpen(true);
 
@@ -132,7 +126,7 @@ export function PlaceInput({
     setQuery(value);
     if (debounceRef.current) window.clearTimeout(debounceRef.current);
 
-    // Filter recent in memory immediately (no network, no debounce).
+    setHistory(loadPlaceHistory());
     setHistoryFilter(value);
     setOpen(true);
 
@@ -178,8 +172,24 @@ export function PlaceInput({
 
   function onInputFocus() {
     editingRef.current = true;
-    // Immediate recent menu — do not wait on search state.
-    openHistoryMenu(query === valueLabel ? "" : query);
+    setHistory(loadPlaceHistory());
+    // Focus alone does not open an empty Recent list — wait for typed text matches
+    // or a search. Keep menu open if query already has matching recents / results.
+    const filter = query === valueLabel ? "" : query;
+    setHistoryFilter(filter);
+    if (filter.trim().length >= 3) {
+      runSearch(filter.trim());
+      return;
+    }
+    const matches = filter.trim() ? filterPlaceHistory(filter, loadPlaceHistory()) : [];
+    if (matches.length > 0) {
+      setOpen(true);
+      setResults([]);
+      setError(null);
+      setLoading(false);
+    } else {
+      setOpen(false);
+    }
   }
 
   return (
@@ -222,29 +232,29 @@ export function PlaceInput({
           ) : null}
         </div>
       </label>
-      {error ? <p className="field-error">{error}</p> : null}
-      {open ? (
+      {error && !showMenu ? <p className="field-error">{error}</p> : null}
+      {showMenu ? (
         <ul className="place-results" role="listbox" aria-label="Place suggestions">
-          <li className="place-results-heading">Recent</li>
-          {cachedMatches.length === 0 ? (
-            <li className="place-results-empty">No recent places yet</li>
-          ) : (
-            cachedMatches.map((r) => (
-              <li key={`cache:${r.id}`}>
-                <button
-                  type="button"
-                  onPointerDown={(e) => {
-                    if (e.button !== 0) return;
-                    e.preventDefault();
-                    pickCached(r);
-                  }}
-                >
-                  <strong>{r.label}</strong>
-                  <span>Recent</span>
-                </button>
-              </li>
-            ))
-          )}
+          {cachedMatches.length > 0 ? (
+            <>
+              <li className="place-results-heading">Recent</li>
+              {cachedMatches.map((r) => (
+                <li key={`cache:${r.id}`}>
+                  <button
+                    type="button"
+                    onPointerDown={(e) => {
+                      if (e.button !== 0) return;
+                      e.preventDefault();
+                      pickCached(r);
+                    }}
+                  >
+                    <strong>{r.label}</strong>
+                    <span>Recent</span>
+                  </button>
+                </li>
+              ))}
+            </>
+          ) : null}
           {loading ? (
             <li className="place-results-empty">Searching…</li>
           ) : results.length > 0 ? (
@@ -253,24 +263,26 @@ export function PlaceInput({
               {results.map((r) => {
                 const short = shortPlaceLabel(r);
                 return (
-                <li key={`${r.source}:${r.id}`}>
-                  <button
-                    type="button"
-                    onPointerDown={(e) => {
-                      if (e.button !== 0) return;
-                      e.preventDefault();
-                      pickResult(r);
-                    }}
-                  >
-                    <strong>{short}</strong>
-                    <span>
-                      {r.city && !short.includes(r.city) ? r.city : r.source}
-                    </span>
-                  </button>
-                </li>
+                  <li key={`${r.source}:${r.id}`}>
+                    <button
+                      type="button"
+                      onPointerDown={(e) => {
+                        if (e.button !== 0) return;
+                        e.preventDefault();
+                        pickResult(r);
+                      }}
+                    >
+                      <strong>{short}</strong>
+                      <span>
+                        {r.city && !short.includes(r.city) ? r.city : r.source}
+                      </span>
+                    </button>
+                  </li>
                 );
               })}
             </>
+          ) : error ? (
+            <li className="place-results-empty">{error}</li>
           ) : null}
         </ul>
       ) : null}
