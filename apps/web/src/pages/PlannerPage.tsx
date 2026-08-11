@@ -205,6 +205,18 @@ export function PlannerPage() {
   const selectedDepartures = selectedKey ? departuresByKey[selectedKey] ?? null : null;
 
   useEffect(() => {
+    if (!isAdjusting) return;
+    // Filters keep requestId stable — open the sheet so the option list visibly updates.
+    setSheetExpanded(true);
+  }, [
+    isAdjusting,
+    enabledModes,
+    limitTotalWalk,
+    maxFrequencyMinutes,
+    maxTotalTimeMinutes,
+  ]);
+
+  useEffect(() => {
     if (!selectedRoute || !plan) return;
     const mode = selectedRoute.planMode ?? "walk_transit";
     const stillThere = plan.routes.some(
@@ -691,6 +703,7 @@ export function PlannerPage() {
             onFrequencyChange={setMaxFrequencyMinutes}
             maxTotalTimeMinutes={maxTotalTimeMinutes}
             onTotalTimeChange={setMaxTotalTimeMinutes}
+            resultCount={isAdjusting ? (plan?.routes.length ?? 0) : null}
             disabled={!isAdjusting}
           />
           {isAdjusting ? (

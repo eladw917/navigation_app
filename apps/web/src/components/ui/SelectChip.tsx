@@ -1,4 +1,5 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Icon } from "./Icon";
 
 type IconName = Parameters<typeof Icon>[0]["name"];
@@ -19,6 +20,8 @@ type Props<T extends string> = {
   disabled?: boolean;
 };
 
+type MenuPos = { top: number; left: number; minWidth: number };
+
 export function SelectChip<T extends string>({
   icon,
   label,
@@ -29,14 +32,43 @@ export function SelectChip<T extends string>({
   disabled = false,
 }: Props<T>) {
   const [open, setOpen] = useState(false);
+  const [menuPos, setMenuPos] = useState<MenuPos | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
+  const menuRef = useRef<HTMLUListElement | null>(null);
   const listId = useId();
   const current = options.find((o) => o.value === value);
+
+  useLayoutEffect(() => {
+    if (!open || !wrapRef.current) {
+      setMenuPos(null);
+      return;
+    }
+    const place = () => {
+      const rect = wrapRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const minWidth = Math.max(rect.width, 9.5 * 16);
+      const maxLeft = window.innerWidth - minWidth - 8;
+      setMenuPos({
+        top: rect.bottom + 6,
+        left: Math.max(8, Math.min(rect.left, maxLeft)),
+        minWidth,
+      });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
     function onDocPointerDown(e: PointerEvent) {
-      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      if (wrapRef.current?.contains(t) || menuRef.current?.contains(t)) return;
+      setOpen(false);
     }
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") setOpen(false);
@@ -67,26 +99,40 @@ export function SelectChip<T extends string>({
         </span>
         <Icon name="chevronDown" size={14} />
       </button>
-      {open ? (
-        <ul className="select-chip-menu" role="listbox" id={listId} aria-label={label}>
-          {options.map((option) => (
-            <li key={option.value}>
-              <button
-                type="button"
-                role="option"
-                aria-selected={option.value === value}
-                className={option.value === value ? "active" : undefined}
-                onClick={() => {
-                  onChange(option.value);
-                  setOpen(false);
-                }}
-              >
-                {option.label}
-              </button>
-            </li>
-          ))}
-        </ul>
-      ) : null}
+      {open && menuPos
+        ? createPortal(
+            <ul
+              ref={menuRef}
+              className="select-chip-menu select-chip-menu-portal"
+              role="listbox"
+              id={listId}
+              aria-label={label}
+              style={{
+                top: menuPos.top,
+                left: menuPos.left,
+                minWidth: menuPos.minWidth,
+              }}
+            >
+              {options.map((option) => (
+                <li key={option.value}>
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected={option.value === value}
+                    className={option.value === value ? "active" : undefined}
+                    onClick={() => {
+                      onChange(option.value);
+                      setOpen(false);
+                    }}
+                  >
+                    {option.label}
+                  </button>
+                </li>
+              ))}
+            </ul>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

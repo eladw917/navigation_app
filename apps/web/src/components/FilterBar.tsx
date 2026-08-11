@@ -19,6 +19,8 @@ type Props = {
   onFrequencyChange: (value: FrequencyMaxMinutes) => void;
   maxTotalTimeMinutes: TotalTimeMaxMinutes;
   onTotalTimeChange: (value: TotalTimeMaxMinutes) => void;
+  /** Live count of options after filters — proves filters are applying. */
+  resultCount?: number | null;
   /** Filters only apply to a computed plan, so they stay inert before one exists. */
   disabled?: boolean;
 };
@@ -39,6 +41,7 @@ export function FilterBar({
   onFrequencyChange,
   maxTotalTimeMinutes,
   onTotalTimeChange,
+  resultCount = null,
   disabled = false,
 }: Props) {
   const modeValue: ModeChoice =
@@ -99,6 +102,11 @@ export function FilterBar({
         disabled={disabled}
         onChange={(next) => onTotalTimeChange(Number(next) as TotalTimeMaxMinutes)}
       />
+      {resultCount != null ? (
+        <span className="filter-result-count" aria-live="polite">
+          {resultCount} option{resultCount === 1 ? "" : "s"}
+        </span>
+      ) : null}
     </div>
   );
 }

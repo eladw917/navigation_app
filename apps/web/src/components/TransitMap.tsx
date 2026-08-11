@@ -1908,6 +1908,7 @@ export function TransitMap({
       map.moveLayer("route-line-transit-outside");
       map.moveLayer("route-line-transit");
       map.moveLayer("route-line-walk");
+      if (map.getLayer("route-line-walk-after")) map.moveLayer("route-line-walk-after");
       map.moveLayer("stops-circle");
 
       map.on("mouseenter", "stops-circle", () => {
@@ -1979,6 +1980,13 @@ export function TransitMap({
     clearLineSelection();
     fittedPlanId.current = null;
   }, [plan?.requestId]);
+
+  // Filters keep requestId stable — drop the open line if it was filtered out.
+  useEffect(() => {
+    if (!browse?.bus || !plan) return;
+    const stillThere = plan.routes.some((r) => routeBusName(r) === browse.bus);
+    if (!stillThere) clearLineSelection();
+  }, [plan, browse?.bus]);
 
   useEffect(() => {
     const map = mapRef.current;

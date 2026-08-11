@@ -271,14 +271,27 @@ export const TOTAL_TIME_MAX_OPTIONS: TotalTimeMaxMinutes[] = [30, 45, 60, 90];
 
 /** True when a route's line headway passes the selected max. "all" keeps every route. */
 export function routePassesMaxFrequency(
-  route: Pick<DirectRoute, "headwaySeconds">,
+  route: Pick<DirectRoute, "headwaySeconds" | "frequencyBucket">,
   maxMinutes: FrequencyMaxMinutes,
 ): boolean {
   if (maxMinutes === "all") return true;
   const headway = route.headwaySeconds;
-  if (headway == null || !Number.isFinite(headway) || headway <= 0) return false;
-  // "Every N min" = headway at most N minutes.
-  return headway / 60 <= maxMinutes;
+  if (headway != null && Number.isFinite(headway) && headway > 0) {
+    return headway / 60 <= maxMinutes;
+  }
+  // Fall back to API bucket when the numeric headway is missing.
+  switch (route.frequencyBucket) {
+    case "under_5":
+      return maxMinutes >= 5;
+    case "about_10":
+      return maxMinutes >= 10;
+    case "about_20":
+      return maxMinutes >= 20;
+    case "over_30":
+      return maxMinutes >= 30;
+    default:
+      return false;
+  }
 }
 
 /** True when station headway passes the selected max. "all" keeps every station. */

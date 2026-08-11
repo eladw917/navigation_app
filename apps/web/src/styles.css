@@ -315,9 +315,6 @@ input {
 }
 
 .select-chip-menu {
-  position: absolute;
-  top: calc(100% + 0.3rem);
-  inset-inline-start: 0;
   z-index: 12;
   min-width: 100%;
   width: max-content;
@@ -329,6 +326,12 @@ input {
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow);
+}
+
+.select-chip-menu-portal {
+  position: fixed;
+  z-index: 80;
+  max-width: min(15rem, calc(100vw - 1rem));
 }
 
 .select-chip-menu button {
@@ -398,7 +401,7 @@ input {
   position: absolute;
   top: var(--space-2);
   inset-inline: var(--space-2);
-  z-index: 5;
+  z-index: 20;
   display: flex;
   align-items: flex-start;
   gap: var(--space-2);
@@ -414,17 +417,26 @@ input {
   flex: 1 1 auto;
   gap: var(--space-2);
   align-items: flex-start;
-  overflow-x: auto;
+  /* Do not clip portaled menus / chip shadows — wrap instead of horizontal clip. */
+  flex-wrap: wrap;
+  overflow: visible;
   padding-bottom: 0.25rem;
-  scrollbar-width: none;
-}
-
-.filter-bar::-webkit-scrollbar {
-  display: none;
 }
 
 .filter-bar .select-chip {
   flex: 0 0 auto;
+}
+
+.filter-result-count {
+  align-self: center;
+  padding: 0.35rem 0.65rem;
+  border-radius: var(--radius-pill);
+  background: rgb(15 23 42 / 78%);
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 650;
+  white-space: nowrap;
+  box-shadow: var(--shadow);
 }
 
 .locate-fab {
