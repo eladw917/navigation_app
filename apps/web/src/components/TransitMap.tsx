@@ -169,6 +169,44 @@ function selectedOptionKey(route: DirectRoute | null | undefined): string | null
   return `${mode}:${route.routeId}:${route.boardStopId}:${route.alightStopId}`;
 }
 
+/** Straight board→alight geometry so the line is visible before (or if) ORS/GTFS path loads. */
+function fallbackPathFromRoute(route: DirectRoute): TripPathResponse {
+  return {
+    tripId: route.tripId,
+    boardStopId: route.boardStopId,
+    alightStopId: route.alightStopId,
+    stops: [
+      {
+        stopId: route.boardStopId,
+        name: route.boardStopName,
+        lng: route.boardLng,
+        lat: route.boardLat,
+        stopSequence: 1,
+        onPath: true,
+        isBoard: true,
+        isAlight: false,
+      },
+      {
+        stopId: route.alightStopId,
+        name: route.alightStopName,
+        lng: route.alightLng,
+        lat: route.alightLat,
+        stopSequence: 2,
+        onPath: true,
+        isBoard: false,
+        isAlight: true,
+      },
+    ],
+    geometry: {
+      type: "LineString",
+      coordinates: [
+        [route.boardLng, route.boardLat],
+        [route.alightLng, route.alightLat],
+      ],
+    },
+  };
+}
+
 type Props = {
   origin: LatLng | null;
   destination: LatLng | null;
@@ -861,7 +899,9 @@ export function TransitMap({
   const openBrowseRef = useRef<(stopId: string, buses: string[]) => void>(() => undefined);
   const selectLineStopRef = useRef<(stopId: string) => boolean>(() => false);
   const pathAbortRef = useRef<AbortController | null>(null);
+  const instanceAbortRef = useRef<AbortController | null>(null);
   const depsAbortRef = useRef<AbortController | null>(null);
+  const openedFromCardRef = useRef<string | null>(null);
   const suppressMapClickRef = useRef(false);
   const originRef = useRef(origin);
   const destinationRef = useRef(destination);
@@ -1309,12 +1349,11 @@ export function TransitMap({
       return;
     }
     if (tripPath?.tripId === nextInstanceTripId) return;
+    // Don't abort the initial line fetch — that race left the map with no transit line.
 
     const controller = new AbortController();
-    pathAbortRef.current?.abort();
-    pathAbortRef.current = controller;
-    setPathLoading(true);
-    setPathError(null);
+    instanceAbortRef.current?.abort();
+    instanceAbortRef.current = controller;
     void fetchTripPath(
       nextInstanceTripId,
       nextInstanceBoardId,
@@ -1324,12 +1363,10 @@ export function TransitMap({
       .then((path) => {
         if (controller.signal.aborted) return;
         setTripPath(path);
-        setPathLoading(false);
       })
       .catch((err) => {
         if ((err as Error).name === "AbortError") return;
         console.warn("[trip-path] next-departure instance failed", err);
-        if (!controller.signal.aborted) setPathLoading(false);
       });
 
     return () => controller.abort();
@@ -1346,8 +1383,11 @@ export function TransitMap({
   function clearLineSelection() {
     pathAbortRef.current?.abort();
     pathAbortRef.current = null;
+    instanceAbortRef.current?.abort();
+    instanceAbortRef.current = null;
     depsAbortRef.current?.abort();
     depsAbortRef.current = null;
+    openedFromCardRef.current = null;
     setBrowse(null);
     setTripPath(null);
     setPathLoading(false);
@@ -1403,6 +1443,8 @@ export function TransitMap({
       forcedRoute ??
       pickRouteForBus(plan.routes, bus, preferredStopId, destination, origin);
     pathAbortRef.current?.abort();
+    instanceAbortRef.current?.abort();
+    instanceAbortRef.current = null;
     const controller = new AbortController();
     pathAbortRef.current = controller;
 
@@ -1416,8 +1458,6 @@ export function TransitMap({
 
     setPathLoading(true);
     setPathError(null);
-    // Keep the previous path drawn until the new one arrives so option switching
-    // doesn't blank the route (matches station-tap behavior).
     fittedPathKey.current = null;
     setBrowse({
       bus,
@@ -1425,9 +1465,13 @@ export function TransitMap({
       index: 0,
       preferredStopId,
       scrollEnd: openingAtAlight ? "alight" : "board",
-      chosenBoardId: null,
-      chosenAlightId: null,
+      chosenBoardId: route?.boardStopId ?? null,
+      chosenAlightId: route?.alightStopId ?? null,
     });
+    if (route) {
+      // Draw board→alight immediately so a slow/aborted shape fetch never leaves a blank map.
+      setTripPath(fallbackPathFromRoute(route));
+    }
     if (preferredStopId) onSelectStopRef.current?.(preferredStopId);
     onLineActiveChangeRef.current?.(true);
     if (route) {
@@ -1563,40 +1607,7 @@ export function TransitMap({
       // Fallback: straight board→alight from capped route list if path geometry failed
       if (route) {
         console.warn("[trip-path] using straight-line fallback", err);
-        const fallbackPath: TripPathResponse = {
-          tripId: route.tripId,
-          boardStopId: route.boardStopId,
-          alightStopId: route.alightStopId,
-          stops: [
-            {
-              stopId: route.boardStopId,
-              name: route.boardStopName,
-              lng: route.boardLng,
-              lat: route.boardLat,
-              stopSequence: 1,
-              onPath: true,
-              isBoard: true,
-              isAlight: false,
-            },
-            {
-              stopId: route.alightStopId,
-              name: route.alightStopName,
-              lng: route.alightLng,
-              lat: route.alightLat,
-              stopSequence: 2,
-              onPath: true,
-              isBoard: false,
-              isAlight: true,
-            },
-          ],
-          geometry: {
-            type: "LineString",
-            coordinates: [
-              [route.boardLng, route.boardLat],
-              [route.alightLng, route.alightLat],
-            ],
-          },
-        };
+        const fallbackPath = fallbackPathFromRoute(route);
         setTripPath(fallbackPath);
         setPathError(null);
         const clickedIsAlight =
@@ -1692,8 +1703,6 @@ export function TransitMap({
     return true;
   };
 
-  const openedFromCardRef = useRef<string | null>(null);
-  // Ignore tripId — next-departure override must not re-open / clear the path.
   const selectedRouteKey = selectedOptionKey(selectedRoute);
 
   useEffect(() => {
@@ -2187,11 +2196,12 @@ export function TransitMap({
 
       iso.setData(plan.isochrone as never);
 
-      if (browse?.bus && tripPath && effectiveBoard) {
-        // Journey walk + transit start follow the active get-on station.
+      if (browse?.bus && tripPath) {
         routeLine.setData(
           buildJourneyGeoJson(origin, destination, tripPath, effectiveBoard, effectiveAlight) as never,
         );
+      } else if (browse?.bus) {
+        // Line is opening — keep whatever is on the map rather than reverting to the O/D walk.
       } else if (isValidLngLat(origin) && isValidLngLat(destination)) {
         // Browse after resolve: show direct walking path between endpoints.
         routeLine.setData(buildOdWalkGeoJson(origin, destination) as never);
