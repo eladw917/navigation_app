@@ -395,8 +395,9 @@ async function searchOverpassHouseNumber(
   signal?: AbortSignal,
 ): Promise<PlaceResult[]> {
   if (!parsed.street || !parsed.housenumber) return [];
-  const hn = normalizeHouseNumber(parsed.housenumber);
-  if (!hn) return [];
+  const hnRaw = normalizeHouseNumber(parsed.housenumber);
+  if (!hnRaw) return [];
+  const hn = hnRaw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
   // ~3.5km box around focus — enough for a city neighborhood, small enough for Overpass.
   const pad = 0.035;

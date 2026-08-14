@@ -72,6 +72,10 @@ fi
 if [[ -f "$RELEASE_DIR/ops/health-check.sh" ]]; then
   install -m 755 "$RELEASE_DIR/ops/health-check.sh" "$ROOT/bin/health-check.sh"
 fi
+if [[ -f "$RELEASE_DIR/ops/navigation-api.service" ]]; then
+  sudo install -m 644 "$RELEASE_DIR/ops/navigation-api.service" /etc/systemd/system/navigation-api.service
+  sudo systemctl daemon-reload
+fi
 
 echo "installing dependencies for $SHA"
 (

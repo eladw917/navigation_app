@@ -30,6 +30,28 @@ systemd unit: `navigation-api.service`
 Working directory: `/home/ubuntu/navigation-api/current`  
 Secrets: `/home/ubuntu/navigation-api/shared/.env`
 
+Required production values in that file:
+
+```text
+HOST=127.0.0.1
+TRUST_PROXY=true
+DOCS_ENABLED=false
+CORS_ORIGINS=https://YOUR-PROJECT.pages.dev
+```
+
+`NODE_ENV=production` is set by `navigation-api.service`. Without `CORS_ORIGINS`, browsers (including Cloudflare Pages) cannot call the API.
+
+### TLS
+
+Do not expose Node on public `:3010`. Terminate HTTPS, then close the port:
+
+1. Point DNS at the VPS (or a Cloudflare tunnel hostname).
+2. Install [Caddy](https://caddyserver.com) and run `ops/Caddyfile` with `API_HOSTNAME` and `CADDY_ACME_EMAIL`.
+3. Set `HOST=127.0.0.1` and `TRUST_PROXY=true` as above.
+4. `sudo ufw delete allow 3010/tcp` (keep 22, 80, 443).
+
+The Node process then only accepts local reverse-proxy traffic. Cloudflare Pages must use the `https://` origin in `VITE_API_BASE_URL`.
+
 ### Automatic deploy
 
 GitHub Actions workflow [`.github/workflows/deploy-api.yml`](../.github/workflows/deploy-api.yml):

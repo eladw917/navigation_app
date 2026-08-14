@@ -23,10 +23,18 @@ EXPLAIN (ANALYZE, BUFFERS)
 
 ## Error states to verify manually
 
-- Missing/invalid `HEIGIT_API_KEY` → API fails at startup
+- Missing/invalid `HEIGIT_API_KEY` → process starts with a warning and uses Nominatim + circular isochrones
 - No active GTFS feed → `/v1/plans/direct` returns 503
 - Outside Israel bounds → 400
-- ORS/Pelias outage → 502 with message (no key leaked)
+- ORS/Pelias outage → 502 with a generic message (no key or upstream body leaked)
+
+## HTTP hardening
+
+- CORS allowlist via `CORS_ORIGINS` (localhost Vite origins in development only)
+- Helmet security headers; Swagger `/docs` off when `NODE_ENV=production`
+- Global 60 req/min; `/v1/plans/direct` 20/min; place search 90/min
+- 5xx responses are generic; details stay in server logs
+- Postgres Compose port is bound to `127.0.0.1` only
 
 ## Data lifecycle (best practices)
 

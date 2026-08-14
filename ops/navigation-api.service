@@ -8,11 +8,26 @@ Type=simple
 User=ubuntu
 Group=ubuntu
 WorkingDirectory=/home/ubuntu/navigation-api/current
+Environment=NODE_ENV=production
 EnvironmentFile=/home/ubuntu/navigation-api/shared/.env
 ExecStart=/usr/bin/node apps/api/dist/index.js
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+SystemCallArchitectures=native
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

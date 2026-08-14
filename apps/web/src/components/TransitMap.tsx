@@ -23,8 +23,7 @@ import {
 
 const STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
 const EMPTY_LINE = { type: "FeatureCollection" as const, features: [] };
-const RTL_TEXT_PLUGIN_URL =
-  "https://unpkg.com/@mapbox/mapbox-gl-rtl-text@0.3.0/dist/mapbox-gl-rtl-text.js";
+const RTL_TEXT_PLUGIN_URL = `${import.meta.env.BASE_URL}mapbox-gl-rtl-text.js`;
 
 /** Hebrew/Arabic basemap labels need the RTL shaping plugin. */
 function ensureRtlTextPlugin() {
@@ -778,7 +777,12 @@ function createWalkLineLabelElement(minutes: number): HTMLDivElement {
   const root = document.createElement("div");
   root.className = "walk-line-label";
   root.setAttribute("role", "status");
-  root.innerHTML = `<span class="walk-line-label-icon" aria-hidden="true"></span><span>~${minutes} min</span>`;
+  const icon = document.createElement("span");
+  icon.className = "walk-line-label-icon";
+  icon.setAttribute("aria-hidden", "true");
+  const label = document.createElement("span");
+  label.textContent = `~${minutes} min`;
+  root.append(icon, label);
   return root;
 }
 

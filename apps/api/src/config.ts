@@ -2,6 +2,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
 import { z } from "zod";
+import {
+  optionalEnvFlag,
+  resolveCorsAllowlist,
+  resolveDocsEnabled,
+  resolveTrustProxy,
+} from "./httpSecurity.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 loadEnv({ path: path.join(root, ".env") });
@@ -9,8 +15,12 @@ loadEnv({ path: path.join(root, ".env") });
 const EnvSchema = z.object({
   DATABASE_URL: z.string().default("postgres://localhost:5432/navigation"),
   PORT: z.coerce.number().default(3010),
-  HOST: z.string().default("0.0.0.0"),
+  HOST: z.string().default("127.0.0.1"),
   LOG_LEVEL: z.string().default("info"),
+  NODE_ENV: z.string().default("development"),
+  CORS_ORIGINS: z.string().default(""),
+  DOCS_ENABLED: z.enum(["true", "false"]).optional(),
+  TRUST_PROXY: z.enum(["true", "false"]).optional(),
   HEIGIT_API_KEY: z.string().default("missing"),
   HEIGIT_ORS_BASE_URL: z.string().url().default("https://api.heigit.org/openrouteservice"),
   HEIGIT_PELIAS_BASE_URL: z.string().url().default("https://api.heigit.org/pelias/v1"),
@@ -27,8 +37,17 @@ if (!parsed.success) {
   throw new Error("Invalid environment configuration");
 }
 
+const docsFlag = optionalEnvFlag(parsed.data.DOCS_ENABLED);
+const trustProxyFlag = optionalEnvFlag(parsed.data.TRUST_PROXY);
+
 export const env = {
   ...parsed.data,
+  corsAllowlist: resolveCorsAllowlist({
+    corsOrigins: parsed.data.CORS_ORIGINS,
+    nodeEnv: parsed.data.NODE_ENV,
+  }),
+  docsEnabled: resolveDocsEnabled(docsFlag, parsed.data.NODE_ENV),
+  trustProxy: resolveTrustProxy(trustProxyFlag, parsed.data.HOST),
   allowedRouteTypes: parsed.data.ALLOWED_ROUTE_TYPES.split(",")
     .map((v) => Number(v.trim()))
     .filter((n) => Number.isFinite(n)),

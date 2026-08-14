@@ -18,6 +18,12 @@ services:
     envVars:
       - key: HOST
         value: "0.0.0.0"
+      - key: TRUST_PROXY
+        value: "true"
+      - key: DOCS_ENABLED
+        value: "false"
+      - key: CORS_ORIGINS
+        sync: false
       - key: LOG_LEVEL
         value: info
       - key: NODE_VERSION

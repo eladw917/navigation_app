@@ -16,10 +16,15 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { env } from "../config.js";
 import { pool } from "../db.js";
+import { RATE_LIMIT_PLAN, RATE_LIMIT_SEARCH, sendCaughtError } from "../httpSecurity.js";
 import { getBoardDepartures } from "../services/departures.js";
 import { reverseGeocode, searchPlaces } from "../services/geocoder.js";
 import { planDirect } from "../services/planner.js";
 import { getTripPath, resolveTripPath } from "../services/tripPath.js";
+
+const GtfsId = z.string().min(1).max(128);
+const RouteShortName = z.string().min(1).max(32);
+const PlaceQuery = z.string().min(1).max(200);
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get("/health", async () => {
@@ -88,9 +93,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     "/v1/places/search",
     {
+      config: { rateLimit: RATE_LIMIT_SEARCH },
       schema: {
         querystring: z.object({
-          q: z.string().min(1),
+          q: PlaceQuery,
           limit: z.coerce.number().int().min(1).max(10).default(5),
         }),
       },
@@ -113,6 +119,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     "/v1/places/reverse",
     {
+      config: { rateLimit: RATE_LIMIT_SEARCH },
       schema: {
         querystring: z.object({
           lng: z.coerce.number(),
@@ -133,6 +140,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     "/v1/plans/direct",
     {
+      config: { rateLimit: RATE_LIMIT_PLAN },
       schema: {
         body: DirectPlanRequestSchema,
       },
@@ -159,15 +167,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         });
         return response;
       } catch (error) {
-        const err = error as Error & { statusCode?: number };
-        const status = err.statusCode && err.statusCode >= 400 && err.statusCode < 600 ? err.statusCode : 502;
-        request.log.error(
-          { err, mode: body.mode, maxWalkingSeconds: body.maxWalkingSeconds },
-          "direct plan failed",
-        );
-        return reply.status(status).send({
-          error: err.message,
-          requestId: request.id,
+        return sendCaughtError(request, reply, error, "direct plan failed", {
+          mode: body.mode,
+          maxWalkingSeconds: body.maxWalkingSeconds,
         });
       }
     },
@@ -178,10 +180,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         querystring: z.object({
-          stopId: z.string().min(1),
-          alightStopId: z.string().min(1),
-          routeShortName: z.string().min(1),
-          routeId: z.string().optional(),
+          stopId: GtfsId,
+          alightStopId: GtfsId,
+          routeShortName: RouteShortName,
+          routeId: z.string().max(128).optional(),
         }),
       },
     },
@@ -201,11 +203,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         });
         return StopDeparturesResponseSchema.parse(body);
       } catch (error) {
-        const err = error as Error & { statusCode?: number };
-        const status =
-          err.statusCode && err.statusCode >= 400 && err.statusCode < 600 ? err.statusCode : 502;
-        request.log.error({ err, ...query }, "departures failed");
-        return reply.status(status).send({ error: err.message, requestId: request.id });
+        return sendCaughtError(request, reply, error, "departures failed", query);
       }
     },
   );
@@ -214,10 +212,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     "/v1/trips/:tripId/path",
     {
       schema: {
-        params: z.object({ tripId: z.string().min(1) }),
+        params: z.object({ tripId: GtfsId }),
         querystring: z.object({
-          boardStopId: z.string().min(1),
-          alightStopId: z.string().min(1),
+          boardStopId: GtfsId,
+          alightStopId: GtfsId,
         }),
       },
     },
@@ -231,14 +229,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         const path = await getTripPath(tripId, boardStopId, alightStopId);
         return TripPathResponseSchema.parse(path);
       } catch (error) {
-        const err = error as Error & { statusCode?: number };
-        const status =
-          err.statusCode && err.statusCode >= 400 && err.statusCode < 600 ? err.statusCode : 502;
-        request.log.error(
-          { err, tripId, boardStopId, alightStopId },
-          "trip path failed",
-        );
-        return reply.status(status).send({ error: err.message, requestId: request.id });
+        return sendCaughtError(request, reply, error, "trip path failed", {
+          tripId,
+          boardStopId,
+          alightStopId,
+        });
       }
     },
   );
@@ -248,8 +243,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     {
       schema: {
         querystring: z.object({
-          routeShortName: z.string().min(1),
-          stopId: z.string().min(1),
+          routeShortName: RouteShortName,
+          stopId: GtfsId,
           mode: PlanModeSchema,
           endpointLng: z.coerce.number(),
           endpointLat: z.coerce.number(),
@@ -277,11 +272,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         });
         return TripPathResponseSchema.parse(path);
       } catch (error) {
-        const err = error as Error & { statusCode?: number };
-        const status =
-          err.statusCode && err.statusCode >= 400 && err.statusCode < 600 ? err.statusCode : 502;
-        request.log.error({ err, ...query }, "resolve trip path failed");
-        return reply.status(status).send({ error: err.message, requestId: request.id });
+        return sendCaughtError(request, reply, error, "resolve trip path failed", query);
       }
     },
   );

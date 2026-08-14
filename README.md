@@ -124,6 +124,8 @@ A valid option is a **single GTFS trip** that boards then alights in sequence (n
 - Keep `HEIGIT_API_KEY` server-side only
 - Rotate any key that was pasted into chat
 - `.env` is gitignored
+- Production API binds loopback; put Caddy or a Cloudflare tunnel in front (see [DEPLOYMENT.md](docs/DEPLOYMENT.md#tls))
+- Set `CORS_ORIGINS` to the Cloudflare Pages origin in production
 
 ## Tests
 

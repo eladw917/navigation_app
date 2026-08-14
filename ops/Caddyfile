@@ -1,0 +1,22 @@
+# TLS terminator for the Navigation API.
+# Bind the Node process to 127.0.0.1:3010, then put Caddy on 443.
+#
+#   export API_HOSTNAME=api.example.com
+#   export CADDY_ACME_EMAIL=you@example.com
+#   sudo caddy run --config /home/ubuntu/navigation-api/current/ops/Caddyfile
+#
+# Then: HOST=127.0.0.1, TRUST_PROXY=true, CORS_ORIGINS=<Pages origin>
+# and `sudo ufw delete allow 3010/tcp`.
+
+{
+	email {$CADDY_ACME_EMAIL}
+}
+
+{$API_HOSTNAME} {
+	encode gzip
+	header {
+		Strict-Transport-Security "max-age=15552000; includeSubDomains"
+		-Server
+	}
+	reverse_proxy 127.0.0.1:3010
+}
