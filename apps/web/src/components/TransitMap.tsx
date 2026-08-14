@@ -168,44 +168,6 @@ function selectedOptionKey(route: DirectRoute | null | undefined): string | null
   return `${mode}:${route.routeId}:${route.boardStopId}:${route.alightStopId}`;
 }
 
-/** Straight board→alight geometry so the line is visible before (or if) ORS/GTFS path loads. */
-function fallbackPathFromRoute(route: DirectRoute): TripPathResponse {
-  return {
-    tripId: route.tripId,
-    boardStopId: route.boardStopId,
-    alightStopId: route.alightStopId,
-    stops: [
-      {
-        stopId: route.boardStopId,
-        name: route.boardStopName,
-        lng: route.boardLng,
-        lat: route.boardLat,
-        stopSequence: 1,
-        onPath: true,
-        isBoard: true,
-        isAlight: false,
-      },
-      {
-        stopId: route.alightStopId,
-        name: route.alightStopName,
-        lng: route.alightLng,
-        lat: route.alightLat,
-        stopSequence: 2,
-        onPath: true,
-        isBoard: false,
-        isAlight: true,
-      },
-    ],
-    geometry: {
-      type: "LineString",
-      coordinates: [
-        [route.boardLng, route.boardLat],
-        [route.alightLng, route.alightLat],
-      ],
-    },
-  };
-}
-
 type Props = {
   origin: LatLng | null;
   destination: LatLng | null;
@@ -1371,6 +1333,10 @@ export function TransitMap({
       .catch((err) => {
         if ((err as Error).name === "AbortError") return;
         console.warn("[trip-path] next-departure instance failed", err);
+        if (!controller.signal.aborted && !tripPath) {
+          const raw = err instanceof Error ? err.message : "Failed to load line path";
+          setPathError(`Couldn't load this line's path. ${raw.slice(0, 280)}`);
+        }
       });
 
     return () => controller.abort();
@@ -1472,10 +1438,9 @@ export function TransitMap({
       chosenBoardId: route?.boardStopId ?? null,
       chosenAlightId: route?.alightStopId ?? null,
     });
-    if (route) {
-      // Draw board→alight immediately so a slow/aborted shape fetch never leaves a blank map.
-      setTripPath(fallbackPathFromRoute(route));
-    }
+    // Don't draw a straight board→alight chord while the real shape loads.
+    // Clearing React state (not the map source) keeps the previous line until fetch returns.
+    setTripPath(null);
     if (preferredStopId) onSelectStopRef.current?.(preferredStopId);
     onLineActiveChangeRef.current?.(true);
     if (route) {
@@ -1608,57 +1573,22 @@ export function TransitMap({
     } catch (err) {
       if ((err as Error).name === "AbortError") return;
 
-      // Fallback: straight board→alight from capped route list if path geometry failed
-      if (route) {
-        console.warn("[trip-path] using straight-line fallback", err);
-        const fallbackPath = fallbackPathFromRoute(route);
-        setTripPath(fallbackPath);
-        setPathError(null);
-        const clickedIsAlight =
-          Boolean(preferredStopId) &&
-          (openingAtAlight || preferredStopId === route.alightStopId);
-        const focusAlightId = clickedIsAlight
-          ? (preferredStopId ?? route.alightStopId)
-          : route.alightStopId;
-        setBrowse({
-          bus,
-          buses,
-          index: clickedIsAlight ? 1 : 0,
-          preferredStopId: clickedIsAlight
-            ? focusAlightId
-            : route.boardStopId,
-          scrollEnd: clickedIsAlight ? "alight" : "board",
-          chosenBoardId: route.boardStopId,
-          chosenAlightId: focusAlightId,
-        });
-        onSelectStopRef.current?.(
-          clickedIsAlight ? focusAlightId : route.boardStopId,
-        );
-        fittedPathKey.current = null;
-        return;
-      }
-
-      const message = err instanceof Error ? err.message : "Failed to load line path";
+      const raw = err instanceof Error ? err.message : "Failed to load line path";
+      const message = raw.startsWith("Couldn't load")
+        ? raw
+        : `Couldn't load this line's path. ${raw.slice(0, 280)}`;
       console.error("[trip-path] failed", { bus, err });
       setPathError(message);
       setTripPath(null);
-      const fallback = busStations.get(bus) ?? [];
-      let index = preferredStopId
-        ? fallback.findIndex((s) => s.stopId === preferredStopId)
-        : 0;
-      if (index < 0) index = 0;
       setBrowse({
         bus,
         buses,
-        index,
+        index: 0,
         preferredStopId,
         scrollEnd: openingAtAlight ? "alight" : "board",
-        chosenBoardId: openingAtAlight
-          ? null
-          : (preferredStopId ?? fallback[index]?.stopId ?? null),
-        chosenAlightId: openingAtAlight ? preferredStopId : null,
+        chosenBoardId: route?.boardStopId ?? preferredStopId,
+        chosenAlightId: route?.alightStopId ?? null,
       });
-      onSelectStopRef.current?.(fallback[index]?.stopId ?? preferredStopId);
     } finally {
       if (!controller.signal.aborted) setPathLoading(false);
     }
@@ -2204,6 +2134,8 @@ export function TransitMap({
         routeLine.setData(
           buildJourneyGeoJson(origin, destination, tripPath, effectiveBoard, effectiveAlight) as never,
         );
+      } else if (browse?.bus && pathError) {
+        routeLine.setData(EMPTY_LINE);
       } else if (browse?.bus) {
         // Line is opening — keep whatever is on the map rather than reverting to the O/D walk.
       } else if (isValidLngLat(origin) && isValidLngLat(destination)) {
@@ -2398,6 +2330,7 @@ export function TransitMap({
     busStations,
     tripPath,
     pathLoading,
+    pathError,
     walkingStopIds,
   ]);
 
