@@ -11,7 +11,10 @@ import { SelectChip, type SelectChipOption } from "./ui/SelectChip";
 
 const ALL_MODES: PlanMode[] = ["walk_transit", "transit_walk"];
 
-const MODE_TOGGLES: { value: PlanMode; label: string }[] = [
+type ModeFilter = "all" | PlanMode;
+
+const MODE_OPTIONS: SelectChipOption<ModeFilter>[] = [
+  { value: "all", label: "Any" },
   { value: "walk_transit", label: "Walk → Transit" },
   { value: "transit_walk", label: "Transit → Walk" },
 ];
@@ -64,34 +67,20 @@ export function FilterBar({
     label: mins === "all" ? "Any" : `${mins} min`,
   }));
 
-  function toggleMode(mode: PlanMode) {
-    const selected = enabledModes.includes(mode);
-    if (selected) {
-      if (enabledModes.length === 1) return;
-      onModesChange(enabledModes.filter((m) => m !== mode));
-      return;
-    }
-    onModesChange(ALL_MODES.filter((m) => m === mode || enabledModes.includes(m)));
-  }
+  const modeValue: ModeFilter =
+    enabledModes.length === 1 ? enabledModes[0]! : "all";
 
   return (
     <div className="filter-bar" role="group" aria-label="Result filters">
-      <div className="filter-mode-toggles" role="group" aria-label="Mode">
-        {MODE_TOGGLES.map((mode) => {
-          const selected = enabledModes.includes(mode.value);
-          return (
-            <button
-              key={mode.value}
-              type="button"
-              className={`filter-mode-toggle${selected ? " active" : ""}`}
-              aria-pressed={selected}
-              onClick={() => toggleMode(mode.value)}
-            >
-              {mode.label}
-            </button>
-          );
-        })}
-      </div>
+      <SelectChip
+        icon="swap"
+        label="Mode"
+        value={modeValue}
+        options={MODE_OPTIONS}
+        onChange={(next) =>
+          onModesChange(next === "all" ? [...ALL_MODES] : [next])
+        }
+      />
       <SelectChip
         icon="walk"
         label="Total walk"

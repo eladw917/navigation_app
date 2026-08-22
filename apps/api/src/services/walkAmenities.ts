@@ -36,7 +36,7 @@ function roundBox(value: number): number {
 }
 
 export function walkAmenityCacheKey(bbox: BBox): string {
-  return `wa|${roundBox(bbox.south)}|${roundBox(bbox.west)}|${roundBox(bbox.north)}|${roundBox(bbox.east)}`;
+  return `wa2|${roundBox(bbox.south)}|${roundBox(bbox.west)}|${roundBox(bbox.north)}|${roundBox(bbox.east)}`;
 }
 
 export function validateWalkAmenityBbox(bbox: BBox): string | null {
@@ -63,8 +63,6 @@ export function validateWalkAmenityBbox(bbox: BBox): string | null {
   return null;
 }
 
-const LIFECYCLE_PREFIXES = ["disused:", "abandoned:", "demolished:", "removed:", "was:", "razed:"] as const;
-
 function isYes(value: string | undefined): boolean {
   const v = value?.trim().toLowerCase();
   return v === "yes" || v === "true" || v === "1";
@@ -81,7 +79,11 @@ function isEndDatePast(raw: string): boolean {
   return Number.isFinite(end) && end < Date.now();
 }
 
-/** OSM objects that are tagged as closed, vacant, or former businesses. */
+/**
+ * Only drop POIs OSM has explicitly marked shut.
+ * Do not treat `was:*` / `disused:*` leftovers as closed — those sit on live shops
+ * after a rename or type change.
+ */
 export function isOsmFeatureClosed(tags: Record<string, string> | undefined): boolean {
   if (!tags) return false;
   const shop = tags.shop?.trim().toLowerCase();
@@ -98,13 +100,9 @@ export function isOsmFeatureClosed(tags: Record<string, string> | undefined): bo
   ) {
     return true;
   }
-  for (const key of Object.keys(tags)) {
-    const lower = key.toLowerCase();
-    if (LIFECYCLE_PREFIXES.some((prefix) => lower.startsWith(prefix))) return true;
-  }
   const hours = tags.opening_hours?.trim().toLowerCase() ?? "";
-  if (hours === "closed" || hours === "off" || /^(?:mo-su\s+)?closed$/.test(hours)) return true;
-  const status = (tags.operational_status ?? tags["opening_hours:status"] ?? "").trim().toLowerCase();
+  if (hours === "closed" || /^(?:mo-su\s+)?closed$/.test(hours)) return true;
+  const status = (tags.operational_status ?? "").trim().toLowerCase();
   if (status === "closed" || status === "closed_permanently" || status === "permanently_closed") {
     return true;
   }
@@ -153,8 +151,7 @@ function amenityDisplayName(tags: Record<string, string>, category: WalkAmenityC
   }
 }
 
-const CLOSED_OVERPASS_FILTERS =
-  '["disused"!="yes"]["abandoned"!="yes"]["opening_hours"!="closed"]["opening_hours"!="off"]';
+const CLOSED_OVERPASS_FILTERS = '["disused"!="yes"]["abandoned"!="yes"]["opening_hours"!="closed"]';
 
 export function buildOverpassQuery(bbox: BBox): string {
   const { south, west, north, east } = bbox;

@@ -23,7 +23,6 @@ import {
 } from "../api";
 import {
   amenitiesAlongCorridors,
-  amenityOnWalk,
   amenityWalkLegs,
   WALK_AMENITY_LABELS,
   type WalkAmenityFilter,
@@ -41,6 +40,7 @@ const WALK_ROUTE_DEBOUNCE_MS = 80;
 
 const STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
 const EMPTY_LINE = { type: "FeatureCollection" as const, features: [] };
+const SHOW_ISOCHRONE = import.meta.env.DEV;
 const RTL_TEXT_PLUGIN_URL = `${import.meta.env.BASE_URL}mapbox-gl-rtl-text.js`;
 const BASEMAP_POI_LAYERS = ["poi_transit", "poi_r1", "poi_r7", "poi_r20"] as const;
 
@@ -103,6 +103,21 @@ function appendCoordinatePoints(value: unknown, points: LatLng[]): void {
 }
 
 /** Avoid MapLibre world-zoom when padding exceeds the map container size. */
+const MAP_EDGE_PAD = { top: 56, bottom: 56, left: 44, right: 44 };
+const FIT_INSET = { top: 20, bottom: 20, left: 20, right: 20 };
+
+function visibleBusPopup(map: MapLibreMap): HTMLElement | null {
+  const el = map.getContainer().parentElement?.querySelector(".bus-popup");
+  return el instanceof HTMLElement ? el : null;
+}
+
+function popupCoverPx(map: MapLibreMap, popup: HTMLElement | null): number {
+  if (!popup) return 0;
+  const mapBox = map.getContainer().getBoundingClientRect();
+  const cardBox = popup.getBoundingClientRect();
+  return Math.max(0, Math.round(mapBox.bottom - cardBox.top));
+}
+
 function clampFramePadding(
   w: number,
   h: number,
@@ -195,17 +210,28 @@ function safeFitBounds(
   const duration = opts?.duration ?? 450;
   const minPad = opts?.minPad ?? 24;
   const edge = Math.max(minPad, Math.min(72, Math.floor(Math.min(w, h) * 0.1)));
+  const rawPadding = {
+    top: opts?.padding?.top ?? edge,
+    bottom: opts?.padding?.bottom ?? edge,
+    left: opts?.padding?.left ?? edge,
+    right: opts?.padding?.right ?? edge,
+  };
+  const card = visibleBusPopup(map);
+  const cardCover = popupCoverPx(map, card);
+  const cardVisible = cardCover >= 48;
   const padding = clampFramePadding(
     w,
     h,
-    {
-      top: opts?.padding?.top ?? edge,
-      bottom: opts?.padding?.bottom ?? edge,
-      left: opts?.padding?.left ?? edge,
-      right: opts?.padding?.right ?? edge,
-    },
+    cardVisible
+      ? {
+          top: Math.max(rawPadding.top, MAP_EDGE_PAD.top),
+          bottom: Math.max(rawPadding.bottom, cardCover + 16),
+          left: Math.max(rawPadding.left, MAP_EDGE_PAD.left),
+          right: Math.max(rawPadding.right, MAP_EDGE_PAD.right),
+        }
+      : rawPadding,
     minPad,
-    opts?.keepBottom === true,
+    opts?.keepBottom === true || cardVisible,
   );
 
   const bounds = new maplibregl.LngLatBounds();
@@ -227,16 +253,6 @@ function safeFitBounds(
 }
 
 type MapFocus = "board" | "alight";
-
-const MAP_EDGE_PAD = { top: 56, bottom: 56, left: 44, right: 44 };
-const FIT_INSET = { top: 20, bottom: 20, left: 20, right: 20 };
-
-function popupCoverPx(map: MapLibreMap, popup: HTMLElement | null): number {
-  if (!popup) return 0;
-  const mapBox = map.getContainer().getBoundingClientRect();
-  const cardBox = popup.getBoundingClientRect();
-  return Math.max(0, Math.round(mapBox.bottom - cardBox.top));
-}
 
 function cameraPaddingForCard(
   map: MapLibreMap,
@@ -293,12 +309,6 @@ function overviewStationIds(
   return ids;
 }
 
-function truncateMapLabel(text: string, max = 28): string {
-  const t = text.trim();
-  if (t.length <= max) return t;
-  return `${t.slice(0, max - 1)}…`;
-}
-
 /** Custom MapLibre marker: pin tip on the exact lat/lng; label floats in CSS only. */
 function createEndpointMarkerElement(
   kind: "origin" | "destination",
@@ -308,8 +318,8 @@ function createEndpointMarkerElement(
   root.className = `endpoint-marker endpoint-marker--${kind}`;
   root.setAttribute("role", "img");
   const roleText = kind === "origin" ? "Origin" : "Destination";
-  const short = label?.trim() ? truncateMapLabel(label) : null;
-  root.setAttribute("aria-label", short ? `${roleText}: ${label!.trim()}` : roleText);
+  const nameText = label?.trim() || null;
+  root.setAttribute("aria-label", nameText ? `${roleText}: ${nameText}` : roleText);
 
   const lab = document.createElement("div");
   lab.className = "endpoint-marker-label";
@@ -317,10 +327,10 @@ function createEndpointMarkerElement(
   role.className = "endpoint-marker-role";
   role.textContent = kind === "origin" ? "A" : "B";
   lab.appendChild(role);
-  if (short) {
+  if (nameText) {
     const name = document.createElement("span");
     name.className = "endpoint-marker-name";
-    name.textContent = short;
+    name.textContent = nameText;
     lab.appendChild(name);
   }
 
@@ -1119,7 +1129,7 @@ function headwayForBus(
   return route?.headwaySeconds ?? null;
 }
 
-/** Distinct from station pins: stops are circles (drop-off = red). Amenities are squares. */
+/** Distinct from station pins: boarding is a circle; get-off is a down arrow. Amenities are squares. */
 const AMENITY_MARKER: Record<
   WalkAmenity["category"],
   { fill: string; stroke: string }
@@ -1168,6 +1178,44 @@ function addAmenityMarkerImages(map: MapLibreMap) {
     ctx.stroke();
     map.addImage(id, ctx.getImageData(0, 0, size, size), { pixelRatio: 2 });
   }
+}
+
+function addAlightMarkerImage(map: MapLibreMap) {
+  const id = "stop-alight-v3";
+  if (map.hasImage(id)) return;
+  const layout = 32;
+  const dpr = 4;
+  const size = layout * dpr;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.scale(dpr, dpr);
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+
+  ctx.beginPath();
+  ctx.arc(16, 16, 13.25, 0, Math.PI * 2);
+  ctx.fillStyle = "#fff";
+  ctx.fill();
+  ctx.lineWidth = 2.15;
+  ctx.strokeStyle = "#1f1f1f";
+  ctx.stroke();
+
+  ctx.strokeStyle = "#1f1f1f";
+  ctx.lineWidth = 2.2;
+  ctx.beginPath();
+  ctx.moveTo(16, 9.5);
+  ctx.lineTo(16, 19);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(10.75, 15.5);
+  ctx.lineTo(16, 21.25);
+  ctx.lineTo(21.25, 15.5);
+  ctx.stroke();
+
+  map.addImage(id, ctx.getImageData(0, 0, size, size), { pixelRatio: dpr });
 }
 
 function amenitiesToGeoJson(
@@ -1287,6 +1335,11 @@ export function TransitMap({
   const alightFrameRef = useRef<LatLng[]>([]);
   const overviewFocusRef = useRef<MapFocus>("board");
   const frameWalkWithAmenityRef = useRef<(point: LatLng) => void>(() => undefined);
+  const skipAmenityLineRestoreRef = useRef(false);
+  const amenityFocusedRef = useRef(false);
+  const restoreAfterAmenityRef = useRef<() => void>(() => undefined);
+  /** auto = overview/journey may refit. end = get-on/get-off walk. poi = amenity. */
+  const cameraHoldRef = useRef<"auto" | "end" | "poi">("auto");
   const fittedPlanId = useRef<string | null>(null);
   const fittedPathKey = useRef<string | null>(null);
 
@@ -1927,6 +1980,8 @@ export function TransitMap({
     setOverviewFocus("board");
     fittedPlanId.current = null;
     fittedPathKey.current = null;
+    cameraHoldRef.current = "auto";
+    amenityFocusedRef.current = false;
   }, [plan?.requestId]);
 
   useLayoutEffect(() => {
@@ -1943,11 +1998,21 @@ export function TransitMap({
   }, [showStationPopup, lineSelected, browse?.scrollEnd, tripPath, stationWalkAmenities.length]);
 
   useEffect(() => {
+    skipAmenityLineRestoreRef.current = true;
     amenityPopupRef.current?.remove();
     amenityPopupRef.current = null;
+    skipAmenityLineRestoreRef.current = false;
+    amenityFocusedRef.current = false;
+    if (cameraHoldRef.current === "poi") cameraHoldRef.current = "auto";
   }, [currentStation?.stopId]);
 
   function clearLineSelection() {
+    skipAmenityLineRestoreRef.current = true;
+    amenityPopupRef.current?.remove();
+    amenityPopupRef.current = null;
+    skipAmenityLineRestoreRef.current = false;
+    amenityFocusedRef.current = false;
+    cameraHoldRef.current = "auto";
     pathAbortRef.current?.abort();
     pathAbortRef.current = null;
     instanceAbortRef.current?.abort();
@@ -1962,14 +2027,41 @@ export function TransitMap({
     setPopupDepartures(null);
     setPopupDeparturesLoading(false);
     fittedPathKey.current = null;
+    fittedPlanId.current = null;
     onSelectStopRef.current?.(null);
     onLineActiveChangeRef.current?.(false);
     onBrowseRouteChangeRef.current?.(null);
   }
 
+  function dismissAmenitySilent() {
+    skipAmenityLineRestoreRef.current = true;
+    amenityPopupRef.current?.remove();
+    amenityPopupRef.current = null;
+    skipAmenityLineRestoreRef.current = false;
+    amenityFocusedRef.current = false;
+    if (cameraHoldRef.current === "poi") cameraHoldRef.current = "auto";
+  }
+
+  function fitOverviewFromRefs(focus: MapFocus) {
+    const map = mapRef.current;
+    if (!map) return;
+    const points = focus === "alight" ? alightFrameRef.current : boardFrameRef.current;
+    safeFitBounds(map, points, {
+      maxZoom: 15,
+      minZoom: 13,
+      duration: 600,
+      padding: { ...MAP_EDGE_PAD, top: MAP_EDGE_PAD.top + 48 },
+    });
+  }
+
   function setOverviewCluster(focus: MapFocus) {
+    dismissAmenitySilent();
+    cameraHoldRef.current = "auto";
     fittedPlanId.current = null;
+    const same = overviewFocusRef.current === focus;
+    overviewFocusRef.current = focus;
     setOverviewFocus(focus);
+    if (same) fitOverviewFromRefs(focus);
   }
 
   async function loadTripPathForBus(
@@ -1998,6 +2090,8 @@ export function TransitMap({
 
     setPathLoading(true);
     setPathError(null);
+    dismissAmenitySilent();
+    cameraHoldRef.current = "auto";
     fittedPathKey.current = null;
     setBrowse({
       bus,
@@ -2207,6 +2301,24 @@ export function TransitMap({
       chosenAlightId: scrollEnd === "alight" ? stopId : browse.chosenAlightId,
     });
     onSelectStopRef.current?.(stopId);
+    if (cameraHoldRef.current === "end") {
+      const picked =
+        (scrollEnd === "alight" ? alightScrollStations[index] : boardScrollStations[index]) ??
+        lineStations.find((s) => s.stopId === stopId);
+      frameLineEnd(
+        scrollEnd,
+        scrollEnd === "board" && picked
+          ? { lng: picked.lng, lat: picked.lat }
+          : effectiveBoard
+            ? { lng: effectiveBoard.lng, lat: effectiveBoard.lat }
+            : null,
+        scrollEnd === "alight" && picked
+          ? { lng: picked.lng, lat: picked.lat }
+          : effectiveAlight
+            ? { lng: effectiveAlight.lng, lat: effectiveAlight.lat }
+            : null,
+      );
+    }
     return true;
   };
 
@@ -2270,7 +2382,7 @@ export function TransitMap({
       const nextEl = createEndpointMarkerElement(kind, label);
       // Pin tip must sit on the true lat/lng at every zoom — never use a screen-pixel
       // Marker offset (that becomes hundreds of meters when zoomed out).
-      const nextKey = `v2:${kind}:${label ?? ""}`;
+      const nextKey = `v3:${kind}:${label ?? ""}`;
       if (!markerRef.current) {
         markerRef.current = new maplibregl.Marker({
           element: nextEl,
@@ -2412,35 +2524,37 @@ export function TransitMap({
         type: "geojson",
         data: { type: "FeatureCollection", features: [] },
       });
-      map.addLayer({
-        id: "isochrone-fill",
-        type: "fill",
-        source: "isochrone",
-        paint: {
-          "fill-color": [
-            "case",
-            ["==", ["get", "planMode"], "transit_walk"],
-            "#b91c1c",
-            "#0f766e",
-          ],
-          "fill-opacity": 0.1,
-        },
-      });
-      map.addLayer({
-        id: "isochrone-line",
-        type: "line",
-        source: "isochrone",
-        paint: {
-          "line-color": [
-            "case",
-            ["==", ["get", "planMode"], "transit_walk"],
-            "#b91c1c",
-            "#0f766e",
-          ],
-          "line-width": 1.5,
-          "line-opacity": 0.75,
-        },
-      });
+      if (SHOW_ISOCHRONE) {
+        map.addLayer({
+          id: "isochrone-fill",
+          type: "fill",
+          source: "isochrone",
+          paint: {
+            "fill-color": [
+              "case",
+              ["==", ["get", "planMode"], "transit_walk"],
+              "#b91c1c",
+              "#0f766e",
+            ],
+            "fill-opacity": 0.1,
+          },
+        });
+        map.addLayer({
+          id: "isochrone-line",
+          type: "line",
+          source: "isochrone",
+          paint: {
+            "line-color": [
+              "case",
+              ["==", ["get", "planMode"], "transit_walk"],
+              "#b91c1c",
+              "#0f766e",
+            ],
+            "line-width": 1.5,
+            "line-opacity": 0.75,
+          },
+        });
+      }
 
       map.addSource("route-line", {
         type: "geojson",
@@ -2515,7 +2629,7 @@ export function TransitMap({
         filter: ["==", ["get", "kind"], "walkAfterEnd"],
         paint: {
           "circle-radius": 3.25,
-          "circle-color": "#dc2626",
+          "circle-color": "#475569",
           "circle-stroke-width": 1.5,
           "circle-stroke-color": "#fff",
         },
@@ -2530,6 +2644,7 @@ export function TransitMap({
         data: { type: "FeatureCollection", features: [] },
       });
       addAmenityMarkerImages(map);
+      addAlightMarkerImage(map);
       map.addLayer({
         id: "walk-amenities-icon",
         type: "symbol",
@@ -2562,6 +2677,7 @@ export function TransitMap({
         id: "stops-circle",
         type: "circle",
         source: "stops",
+        filter: ["!=", ["get", "role"], "alighting"],
         paint: {
           // Line stops stay fixed size. Drop-off option pins are uniform;
           // boarding / both scale with frequency. Selection uses stroke only.
@@ -2596,8 +2712,6 @@ export function TransitMap({
               ["get", "role"],
               "boarding",
               "#15803d",
-              "alighting",
-              "#b91c1c",
               "both",
               "#7c3aed",
               "#334155",
@@ -2638,6 +2752,51 @@ export function TransitMap({
           ],
         },
       });
+      map.addLayer({
+        id: "stops-alight",
+        type: "symbol",
+        source: "stops",
+        filter: ["==", ["get", "role"], "alighting"],
+        layout: {
+          "icon-image": "stop-alight-v3",
+          "icon-anchor": "center",
+          "icon-allow-overlap": true,
+          "icon-ignore-placement": true,
+          "icon-padding": 0,
+          "icon-size": [
+            "case",
+            ["==", ["get", "dim"], true],
+            0.88,
+            ["==", ["get", "lineStop"], true],
+            0.9,
+            [
+              "match",
+              ["get", "freqBucket"],
+              "under_5",
+              1.12,
+              "about_10",
+              1.04,
+              "about_20",
+              1,
+              "over_30",
+              0.92,
+              1,
+            ],
+          ],
+        },
+        paint: {
+          "icon-opacity": [
+            "case",
+            ["==", ["get", "dim"], true],
+            0.55,
+            ["==", ["get", "freqBucket"], "unknown"],
+            0.85,
+            ["==", ["get", "outside"], true],
+            0.85,
+            1,
+          ],
+        },
+      });
       // Keep stop hits above the route line so line stations stay clickable
       map.moveLayer("route-line-transit-outside");
       map.moveLayer("route-line-transit");
@@ -2649,11 +2808,18 @@ export function TransitMap({
       }
       if (map.getLayer("walk-amenities-icon")) map.moveLayer("walk-amenities-icon");
       map.moveLayer("stops-circle");
+      if (map.getLayer("stops-alight")) map.moveLayer("stops-alight");
 
       map.on("mouseenter", "stops-circle", () => {
         map.getCanvas().style.cursor = "pointer";
       });
       map.on("mouseleave", "stops-circle", () => {
+        map.getCanvas().style.cursor = "";
+      });
+      map.on("mouseenter", "stops-alight", () => {
+        map.getCanvas().style.cursor = "pointer";
+      });
+      map.on("mouseleave", "stops-alight", () => {
         map.getCanvas().style.cursor = "";
       });
 
@@ -2676,7 +2842,9 @@ export function TransitMap({
         const kind = WALK_AMENITY_LABELS[category] ?? "Place";
         const walkNote = String(props.walkNote ?? "On the walking path");
         const meters = Number(props.meters ?? 0);
+        skipAmenityLineRestoreRef.current = true;
         amenityPopupRef.current?.remove();
+        skipAmenityLineRestoreRef.current = false;
         const body = document.createElement("div");
         body.className = "amenity-popup";
         const title = document.createElement("strong");
@@ -2694,7 +2862,7 @@ export function TransitMap({
             : `${meters} m from start`;
           body.append(dist);
         }
-        amenityPopupRef.current = new maplibregl.Popup({
+        const popup = new maplibregl.Popup({
           closeButton: true,
           offset: 12,
           className: "amenity-popup-tip",
@@ -2702,10 +2870,16 @@ export function TransitMap({
           .setLngLat(coords)
           .setDOMContent(body)
           .addTo(map);
+        popup.on("close", () => {
+          if (amenityPopupRef.current === popup) amenityPopupRef.current = null;
+          if (skipAmenityLineRestoreRef.current) return;
+          restoreAfterAmenityRef.current();
+        });
+        amenityPopupRef.current = popup;
         frameWalkWithAmenityRef.current({ lng: coords[0], lat: coords[1] });
       });
 
-      map.on("click", "stops-circle", (e: MapLayerMouseEvent) => {
+      const onStopClick = (e: MapLayerMouseEvent) => {
         e.originalEvent.stopPropagation();
         suppressMapClickRef.current = true;
         const feature = e.features?.[0];
@@ -2723,7 +2897,7 @@ export function TransitMap({
           String(props.endpoint ?? "") === "board";
 
         // When a line is open, move the station stepper. Otherwise open buses at this pin
-        // (including red get-off pins — do not return early on a failed select).
+        // (including get-off arrows — do not return early on a failed select).
         if (isLineStop || isEndpoint) {
           if (selectLineStopRef.current(stopId)) return;
         }
@@ -2733,7 +2907,9 @@ export function TransitMap({
           .map((b) => b.trim())
           .filter(Boolean);
         openBrowseRef.current(stopId, buses);
-      });
+      };
+      map.on("click", "stops-circle", onStopClick);
+      map.on("click", "stops-alight", onStopClick);
 
       map.on("click", (e) => {
         // Defer so the stops-circle handler can mark the click first
@@ -2743,11 +2919,21 @@ export function TransitMap({
             return;
           }
           const hits = map.queryRenderedFeatures(e.point, {
-            layers: ["stops-circle", "walk-amenities-icon"].filter((id) =>
+            layers: ["stops-circle", "stops-alight", "walk-amenities-icon"].filter((id) =>
               Boolean(map.getLayer(id)),
             ),
           });
-          if (!hits.length) clearLineSelection();
+          if (!hits.length) {
+            if (amenityFocusedRef.current || amenityPopupRef.current) {
+              skipAmenityLineRestoreRef.current = true;
+              amenityPopupRef.current?.remove();
+              amenityPopupRef.current = null;
+              skipAmenityLineRestoreRef.current = false;
+              restoreAfterAmenityRef.current();
+              return;
+            }
+            clearLineSelection();
+          }
         }, 0);
       });
 
@@ -2842,12 +3028,11 @@ export function TransitMap({
     const run = () => {
       const live = mapRef.current;
       if (!live) return;
-      live.stop();
-      live.easeTo({
-        center: [point.lng, point.lat],
-        zoom: Math.max(live.getZoom(), 15),
+      safeFitBounds(live, [point], {
+        maxZoom: Math.max(live.getZoom(), 15),
+        minZoom: 15,
         duration: 450,
-        essential: true,
+        keepBottom: true,
       });
     };
     if (map.isStyleLoaded()) {
@@ -2872,7 +3057,7 @@ export function TransitMap({
       const routeLine = map.getSource("route-line") as GeoJSONSource | undefined;
       if (!iso || !stops || !routeLine) return;
 
-      iso.setData(plan.isochrone as never);
+      iso.setData((SHOW_ISOCHRONE ? plan.isochrone : EMPTY_LINE) as never);
 
       const boardPt = effectiveBoard
         ? { lng: effectiveBoard.lng, lat: effectiveBoard.lat }
@@ -3029,11 +3214,15 @@ export function TransitMap({
         }) as never,
       );
       if (!stationWalkAmenities.length) {
+        skipAmenityLineRestoreRef.current = true;
         amenityPopupRef.current?.remove();
         amenityPopupRef.current = null;
+        skipAmenityLineRestoreRef.current = false;
+        amenityFocusedRef.current = false;
       }
       if (map.getLayer("walk-amenities-icon")) map.moveLayer("walk-amenities-icon");
       if (map.getLayer("stops-circle")) map.moveLayer("stops-circle");
+      if (map.getLayer("stops-alight")) map.moveLayer("stops-alight");
 
       const extraTop = browse?.bus ? 0 : 48;
       const waitingForCard = showStationPopup && popupCoverPx(map, popupRef.current) < 48;
@@ -3042,6 +3231,10 @@ export function TransitMap({
         return;
       }
       if (!browse?.bus && waitingForCard) {
+        syncEndpointMarkers.current();
+        return;
+      }
+      if (amenityFocusedRef.current || cameraHoldRef.current !== "auto") {
         syncEndpointMarkers.current();
         return;
       }
@@ -3057,14 +3250,7 @@ export function TransitMap({
           syncEndpointMarkers.current();
           return;
         }
-        const onSuggested =
-          effectiveBoard?.stopId === recommendedBoardId &&
-          effectiveAlight?.stopId === recommendedAlightId;
-        if (!onSuggested) {
-          syncEndpointMarkers.current();
-          return;
-        }
-        const pathKey = `${browse.bus}:line:${effectiveBoard?.stopId ?? tripPath.boardStopId}:${effectiveAlight?.stopId ?? tripPath.alightStopId}:${toBoardRouted?.length ?? 0}:${fromAlightRouted?.length ?? 0}`;
+        const pathKey = `${browse.bus}:line:${tripPath.tripId}:${tripPath.boardStopId}:${tripPath.alightStopId}:${toBoardRouted?.length ?? 0}:${fromAlightRouted?.length ?? 0}`;
         if (fittedPathKey.current !== pathKey) {
           fittedPathKey.current = pathKey;
           const points = journeyFitPoints(
@@ -3197,11 +3383,28 @@ export function TransitMap({
         browse.scrollEnd === "alight" ? station.stopId : browse.chosenAlightId,
     });
     onSelectStopRef.current?.(station.stopId);
+    if (cameraHoldRef.current === "end") {
+      frameLineEnd(
+        browse.scrollEnd,
+        browse.scrollEnd === "board"
+          ? { lng: station.lng, lat: station.lat }
+          : effectiveBoard
+            ? { lng: effectiveBoard.lng, lat: effectiveBoard.lat }
+            : null,
+        browse.scrollEnd === "alight"
+          ? { lng: station.lng, lat: station.lat }
+          : effectiveAlight
+            ? { lng: effectiveAlight.lng, lat: effectiveAlight.lat }
+            : null,
+      );
+    }
   }
 
   function frameWholeJourney() {
     const map = mapRef.current;
     if (!map || !tripPath) return;
+    dismissAmenitySilent();
+    cameraHoldRef.current = "auto";
     fittedPathKey.current = null;
     const boardPt = effectiveBoard
       ? { lng: effectiveBoard.lng, lat: effectiveBoard.lat }
@@ -3231,40 +3434,117 @@ export function TransitMap({
       maxZoom: 14,
       minZoom: 11,
       duration: 550,
+      keepBottom: true,
       padding: FIT_INSET,
     });
+  }
+
+  function lineEndPoints(
+    end: ScrollEnd,
+    board: { lng: number; lat: number } | null,
+    alight: { lng: number; lat: number } | null,
+  ): LatLng[] {
+    const points: LatLng[] = [];
+    if (end === "board") {
+      if (isValidLngLat(origin)) points.push(origin);
+      if (board && isValidLngLat(board)) points.push(board);
+      const walk =
+        origin && board && isValidLngLat(origin) && isValidLngLat(board)
+          ? walkByKey[walkPairKey(origin, board)]
+          : null;
+      if (walk && !walk.approximated) {
+        for (const [lng, lat] of walk.coordinates) {
+          if (Number.isFinite(lng) && Number.isFinite(lat)) points.push({ lng, lat });
+        }
+      }
+    } else {
+      if (alight && isValidLngLat(alight)) points.push(alight);
+      if (isValidLngLat(destination)) points.push(destination);
+      const walk =
+        alight && destination && isValidLngLat(alight) && isValidLngLat(destination)
+          ? walkByKey[walkPairKey(alight, destination)]
+          : null;
+      if (walk && !walk.approximated) {
+        for (const [lng, lat] of walk.coordinates) {
+          if (Number.isFinite(lng) && Number.isFinite(lat)) points.push({ lng, lat });
+        }
+      }
+    }
+    return points;
+  }
+
+  function frameLineEnd(
+    end: ScrollEnd,
+    board = effectiveBoard ? { lng: effectiveBoard.lng, lat: effectiveBoard.lat } : null,
+    alight = effectiveAlight ? { lng: effectiveAlight.lng, lat: effectiveAlight.lat } : null,
+  ) {
+    const map = mapRef.current;
+    if (!map) return;
+    dismissAmenitySilent();
+    cameraHoldRef.current = "end";
+    safeFitBounds(map, lineEndPoints(end, board, alight), {
+      maxZoom: 16,
+      minZoom: 14,
+      duration: 450,
+      keepBottom: true,
+    });
+  }
+
+  function selectLineEnd(end: ScrollEnd) {
+    if (!browse?.bus) return;
+    const stations = end === "alight" ? alightScrollStations : boardScrollStations;
+    const chosenId = end === "alight" ? chosenAlightId : chosenBoardId;
+    let index = stations.findIndex((s) => s.stopId === chosenId);
+    if (index < 0) index = 0;
+    const station = stations[index];
+    setBrowse({
+      ...browse,
+      scrollEnd: end,
+      index: Math.max(0, index),
+      preferredStopId: station?.stopId ?? browse.preferredStopId,
+    });
+    frameLineEnd(
+      end,
+      end === "board" && station
+        ? { lng: station.lng, lat: station.lat }
+        : effectiveBoard
+          ? { lng: effectiveBoard.lng, lat: effectiveBoard.lat }
+          : null,
+      end === "alight" && station
+        ? { lng: station.lng, lat: station.lat }
+        : effectiveAlight
+          ? { lng: effectiveAlight.lng, lat: effectiveAlight.lat }
+          : null,
+    );
+  }
+
+  function restoreAfterAmenity() {
+    amenityFocusedRef.current = false;
+    cameraHoldRef.current = "auto";
+    const map = mapRef.current;
+    if (!map) return;
+    if (browseRef.current?.bus) {
+      frameWholeJourney();
+      return;
+    }
+    fittedPlanId.current = null;
+    fitOverviewFromRefs(overviewFocusRef.current);
   }
 
   function frameWalkWithAmenity(point: LatLng) {
     const map = mapRef.current;
     if (!map) return;
-    const board = effectiveBoard
-      ? { lng: effectiveBoard.lng, lat: effectiveBoard.lat }
-      : null;
-    const alight = effectiveAlight
-      ? { lng: effectiveAlight.lng, lat: effectiveAlight.lat }
-      : null;
-    const dummy = { id: "", name: "", category: "cafe" as const, ...point };
-    const onAfter =
-      alight && destination && amenityOnWalk(dummy, alight, destination);
-    const onToBoard =
-      board && origin && amenityOnWalk(dummy, origin, board);
-    const cluster: LatLng[] = [point];
-    if (onAfter && !onToBoard) {
-      if (alight) cluster.push(alight);
-      if (destination) cluster.push(destination);
-    } else {
-      if (origin) cluster.push(origin);
-      if (board) cluster.push(board);
-    }
-    safeFitBounds(map, cluster, {
+    amenityFocusedRef.current = true;
+    cameraHoldRef.current = "poi";
+    safeFitBounds(map, [point], {
       maxZoom: 16,
-      minZoom: 14,
+      minZoom: 15,
       duration: 450,
-      padding: FIT_INSET,
+      keepBottom: true,
     });
   }
   frameWalkWithAmenityRef.current = frameWalkWithAmenity;
+  restoreAfterAmenityRef.current = restoreAfterAmenity;
 
   return (
     <div className="map-wrap">
@@ -3381,7 +3661,12 @@ export function TransitMap({
               </div>
 
               <div className="popup-trip-ends">
-                <div className="popup-end board">
+                <button
+                  type="button"
+                  className={`popup-end board${browse.scrollEnd === "board" ? " active" : ""}`}
+                  aria-pressed={browse.scrollEnd === "board"}
+                  onClick={() => selectLineEnd("board")}
+                >
                   <em>Get on</em>
                   <strong>{effectiveBoard?.name ?? "…"}</strong>
                   <span>
@@ -3393,8 +3678,13 @@ export function TransitMap({
                         ) ?? "")
                       : ""}
                   </span>
-                </div>
-                <div className="popup-end alight">
+                </button>
+                <button
+                  type="button"
+                  className={`popup-end alight${browse.scrollEnd === "alight" ? " active" : ""}`}
+                  aria-pressed={browse.scrollEnd === "alight"}
+                  onClick={() => selectLineEnd("alight")}
+                >
                   <em>Get off</em>
                   <strong>
                     {effectiveAlight?.name ??
@@ -3409,7 +3699,7 @@ export function TransitMap({
                         ) ?? "")
                       : ""}
                   </span>
-                </div>
+                </button>
               </div>
               <button
                 type="button"

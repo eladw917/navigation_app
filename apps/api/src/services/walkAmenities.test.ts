@@ -30,16 +30,21 @@ describe("walkAmenities", () => {
     assert.equal(classifyOsmTags({ amenity: "cafe", disused: "yes" }), null);
     assert.equal(classifyOsmTags({ "disused:amenity": "cafe", name: "Old Cafe" }), null);
     assert.equal(classifyOsmTags({ amenity: "cafe", shop: "vacant" }), null);
+    assert.equal(classifyOsmTags({ amenity: "cafe", "was:name": "Old Name", "was:shop": "yes" }), "cafe");
   });
 
-  it("treats OSM closed / vacant / former tags as gone", () => {
+  it("only treats OSM features as gone when they are explicitly shut", () => {
     assert.equal(isOsmFeatureClosed({ amenity: "cafe" }), false);
     assert.equal(isOsmFeatureClosed({ amenity: "cafe", opening_hours: "Mo-Fr 08:00-18:00" }), false);
+    assert.equal(
+      isOsmFeatureClosed({ amenity: "cafe", "was:name": "Aroma", "was:shop": "convenience" }),
+      false,
+    );
+    assert.equal(isOsmFeatureClosed({ amenity: "cafe", "disused:shop": "yes" }), false);
     assert.equal(isOsmFeatureClosed({ amenity: "cafe", opening_hours: "closed" }), true);
-    assert.equal(isOsmFeatureClosed({ amenity: "cafe", opening_hours: "off" }), true);
+    assert.equal(isOsmFeatureClosed({ amenity: "cafe", opening_hours: "off" }), false);
     assert.equal(isOsmFeatureClosed({ amenity: "cafe", disused: "yes" }), true);
     assert.equal(isOsmFeatureClosed({ amenity: "cafe", abandoned: "yes" }), true);
-    assert.equal(isOsmFeatureClosed({ "disused:shop": "convenience" }), true);
     assert.equal(isOsmFeatureClosed({ shop: "vacant" }), true);
     assert.equal(isOsmFeatureClosed({ amenity: "cafe", operational_status: "closed" }), true);
     assert.equal(isOsmFeatureClosed({ amenity: "cafe", end_date: "2020" }), true);
