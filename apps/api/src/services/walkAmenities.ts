@@ -11,6 +11,7 @@ export type BBox = {
 const OVERPASS_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
+  "https://overpass.osm.ch/api/interpreter",
 ] as const;
 
 const OVERPASS_UA = "navigationApp/0.1 (Israeli walk+transit MVP; walk-amenity filter)";
@@ -18,7 +19,8 @@ const OVERPASS_UA = "navigationApp/0.1 (Israeli walk+transit MVP; walk-amenity f
 /** ~9 km — a 30 min walk isochrone plus padding; larger boxes time out on public Overpass. */
 export const MAX_BBOX_SPAN_DEG = 0.08;
 
-const cache = new LruTtlCache<{ amenities: WalkAmenity[]; source: string }>(80, 1000 * 60 * 30);
+/** Short TTL: Overpass is already a few minutes behind OSM; don't sit on empty/stale boxes. */
+const cache = new LruTtlCache<{ amenities: WalkAmenity[]; source: string }>(80, 1000 * 60 * 5);
 
 type OverpassElement = {
   type: string;
@@ -61,13 +63,62 @@ export function validateWalkAmenityBbox(bbox: BBox): string | null {
   return null;
 }
 
+const LIFECYCLE_PREFIXES = ["disused:", "abandoned:", "demolished:", "removed:", "was:", "razed:"] as const;
+
+function isYes(value: string | undefined): boolean {
+  const v = value?.trim().toLowerCase();
+  return v === "yes" || v === "true" || v === "1";
+}
+
+function isEndDatePast(raw: string): boolean {
+  const trimmed = raw.trim();
+  const match = trimmed.match(/^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?$/);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = match[2] ? Number(match[2]) : 12;
+  const day = match[3] ? Number(match[3]) : 31;
+  const end = Date.UTC(year, month - 1, day, 23, 59, 59);
+  return Number.isFinite(end) && end < Date.now();
+}
+
+/** OSM objects that are tagged as closed, vacant, or former businesses. */
+export function isOsmFeatureClosed(tags: Record<string, string> | undefined): boolean {
+  if (!tags) return false;
+  const shop = tags.shop?.trim().toLowerCase();
+  const amenity = tags.amenity?.trim().toLowerCase();
+  if (shop === "vacant" || shop === "closed" || amenity === "vacant" || amenity === "disused") {
+    return true;
+  }
+  if (
+    isYes(tags.disused) ||
+    isYes(tags.abandoned) ||
+    isYes(tags.demolished) ||
+    isYes(tags.razed) ||
+    isYes(tags.closed)
+  ) {
+    return true;
+  }
+  for (const key of Object.keys(tags)) {
+    const lower = key.toLowerCase();
+    if (LIFECYCLE_PREFIXES.some((prefix) => lower.startsWith(prefix))) return true;
+  }
+  const hours = tags.opening_hours?.trim().toLowerCase() ?? "";
+  if (hours === "closed" || hours === "off" || /^(?:mo-su\s+)?closed$/.test(hours)) return true;
+  const status = (tags.operational_status ?? tags["opening_hours:status"] ?? "").trim().toLowerCase();
+  if (status === "closed" || status === "closed_permanently" || status === "permanently_closed") {
+    return true;
+  }
+  if (tags.end_date && isEndDatePast(tags.end_date)) return true;
+  return false;
+}
+
 export function classifyOsmTags(tags: Record<string, string> | undefined): WalkAmenityCategory | null {
-  if (!tags) return null;
+  if (!tags || isOsmFeatureClosed(tags)) return null;
   const amenity = tags.amenity;
   const shop = tags.shop;
   const leisure = tags.leisure;
 
-  if (amenity === "cafe" || amenity === "ice_cream") return "cafe";
+  if (amenity === "cafe" || amenity === "ice_cream" || shop === "coffee") return "cafe";
   if (shop === "bakery" || amenity === "bakery") return "bakery";
   if (
     shop === "supermarket" ||
@@ -102,18 +153,21 @@ function amenityDisplayName(tags: Record<string, string>, category: WalkAmenityC
   }
 }
 
+const CLOSED_OVERPASS_FILTERS =
+  '["disused"!="yes"]["abandoned"!="yes"]["opening_hours"!="closed"]["opening_hours"!="off"]';
+
 export function buildOverpassQuery(bbox: BBox): string {
   const { south, west, north, east } = bbox;
   const box = `${south},${west},${north},${east}`;
   return `
 [out:json][timeout:18];
 (
-  node["amenity"~"^(cafe|ice_cream|pharmacy|atm|bank|bakery)$"](${box});
-  way["amenity"~"^(cafe|ice_cream|pharmacy|atm|bank|bakery)$"](${box});
-  node["shop"~"^(supermarket|convenience|bakery|greengrocer|grocery|chemist)$"](${box});
-  way["shop"~"^(supermarket|convenience|bakery|greengrocer|grocery|chemist)$"](${box});
-  node["leisure"~"^(park|playground|garden)$"](${box});
-  way["leisure"~"^(park|playground|garden)$"](${box});
+  node["amenity"~"^(cafe|ice_cream|pharmacy|atm|bank|bakery)$"]${CLOSED_OVERPASS_FILTERS}(${box});
+  way["amenity"~"^(cafe|ice_cream|pharmacy|atm|bank|bakery)$"]${CLOSED_OVERPASS_FILTERS}(${box});
+  node["shop"~"^(supermarket|convenience|bakery|greengrocer|grocery|chemist|coffee)$"]${CLOSED_OVERPASS_FILTERS}(${box});
+  way["shop"~"^(supermarket|convenience|bakery|greengrocer|grocery|chemist|coffee)$"]${CLOSED_OVERPASS_FILTERS}(${box});
+  node["leisure"~"^(park|playground|garden)$"]${CLOSED_OVERPASS_FILTERS}(${box});
+  way["leisure"~"^(park|playground|garden)$"]${CLOSED_OVERPASS_FILTERS}(${box});
 );
 out center 300;
 `.trim();
@@ -186,7 +240,8 @@ export async function fetchWalkAmenities(
     try {
       const amenities = await postOverpass(url, query, combined);
       const source = new URL(url).host;
-      cache.set(key, { amenities, source });
+      // Empty often means a timeout/truncation — don't freeze that for the TTL.
+      if (amenities.length) cache.set(key, { amenities, source });
       return { amenities, cached: false, source };
     } catch (err) {
       lastError = err;

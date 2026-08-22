@@ -6,7 +6,7 @@ import { pool } from "../db.js";
 import { env } from "../config.js";
 import { fetchWalkingIsochrone } from "./orsIsochrone.js";
 import { headwayToBucket } from "./frequency.js";
-import { israelLocalNow } from "./departures.js";
+import { israelLocalNow, parseClockAt } from "./departures.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -118,7 +118,9 @@ function resolveFrequencyWindow(request: DirectPlanRequest): {
           : [0, 1, 2, 3, 4, 5, 6],
     };
   }
-  const { dayOfWeek, nowSecs } = israelLocalNow();
+  const { dayOfWeek, nowSecs } = israelLocalNow(
+    request.at ? parseClockAt(request.at) : undefined,
+  );
   let startSecs = nowSecs;
   let endSecs = nowSecs + 3600;
   // Stay on today's GTFS clock; near midnight use the last hour of the day.

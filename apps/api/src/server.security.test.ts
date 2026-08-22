@@ -71,4 +71,17 @@ describe("API security headers and CORS", () => {
       await app.close();
     }
   });
+
+  it("rejects invalid leave-at timestamps on departures", async () => {
+    const app = await buildServer();
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: "/v1/departures?stopId=1&alightStopId=2&routeShortName=5&at=not-a-date",
+      });
+      assert.equal(response.statusCode, 400);
+    } finally {
+      await app.close();
+    }
+  });
 });

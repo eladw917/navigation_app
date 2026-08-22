@@ -5,6 +5,7 @@ import {
   DirectPlanResponseSchema,
   GtfsStatusSchema,
   HealthResponseSchema,
+  IsoInstantSchema,
   ISRAEL_BOUNDS,
   PlaceSearchResponseSchema,
   PlanModeSchema,
@@ -295,6 +296,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           alightStopId: GtfsId,
           routeShortName: RouteShortName,
           routeId: z.string().max(128).optional(),
+          at: IsoInstantSchema.optional(),
         }),
       },
     },
@@ -304,6 +306,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         alightStopId: string;
         routeShortName: string;
         routeId?: string;
+        at?: string;
       };
       try {
         const body = await getBoardDepartures({
@@ -311,6 +314,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           alightStopId: query.alightStopId,
           routeShortName: query.routeShortName,
           routeId: query.routeId,
+          at: query.at,
         });
         return StopDeparturesResponseSchema.parse(body);
       } catch (error) {

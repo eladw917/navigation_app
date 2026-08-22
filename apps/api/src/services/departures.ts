@@ -77,13 +77,21 @@ function toDeparture(row: DepRow): ScheduledDeparture {
   };
 }
 
+/** Parse an optional ISO instant; invalid or omitted values mean live now. */
+export function parseClockAt(at?: string | null): Date {
+  if (!at?.trim()) return new Date();
+  const parsed = new Date(at);
+  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+}
+
 export async function getBoardDepartures(input: {
   stopId: string;
   alightStopId: string;
   routeShortName: string;
   routeId?: string | null;
+  at?: string | null;
 }): Promise<StopDeparturesResponse> {
-  const { dayOfWeek, nowSecs } = israelLocalNow();
+  const { dayOfWeek, nowSecs } = israelLocalNow(parseClockAt(input.at));
   const tomorrowDow = (dayOfWeek + 1) % 7;
   // UI may send `3:5` (route_type:short_name); GTFS match uses plain short name.
   const shortName = input.routeShortName.replace(/^\d+:/, "").trim() || input.routeShortName;

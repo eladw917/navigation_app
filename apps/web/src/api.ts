@@ -179,6 +179,8 @@ export async function planDirect(
     hoursEnd?: number;
     daysOfWeek?: number[];
     filterBySchedule?: boolean;
+    /** ISO-8601 instant for “leave at”. Omit for live now. */
+    at?: string;
   },
   signal?: AbortSignal,
 ): Promise<DirectPlanResponse> {
@@ -299,6 +301,7 @@ export async function fetchBoardDepartures(
     alightStopId: string;
     routeShortName: string;
     routeId?: string | null;
+    at?: string;
   },
   signal?: AbortSignal,
 ): Promise<StopDeparturesResponse> {
@@ -308,5 +311,6 @@ export async function fetchBoardDepartures(
     routeShortName: input.routeShortName,
   });
   if (input.routeId) params.set("routeId", input.routeId);
+  if (input.at) params.set("at", input.at);
   return apiGet<StopDeparturesResponse>(`/v1/departures?${params}`, signal);
 }

@@ -259,6 +259,100 @@ export function routeOptionKey(route: DirectRoute): string {
   return `${mode}-${route.routeId}-${route.boardStopId}-${route.alightStopId}`;
 }
 
+/** Headway from departures in the next hour, matching the planner (window / count). */
+export function headwayFromDepartures(
+  deps: Pick<StopDeparturesResponse, "departures" | "nowSecs">,
+  windowSeconds = 3600,
+): number | null {
+  if (!deps.departures.length || windowSeconds <= 0) return null;
+  const end = deps.nowSecs + windowSeconds;
+  let count = 0;
+  for (const dep of deps.departures) {
+    const abs = dep.dayOffset * 86400 + dep.departureSecs;
+    if (abs >= deps.nowSecs && abs < end) count += 1;
+  }
+  if (count <= 0) return null;
+  return windowSeconds / count;
+}
+
+function lineNameKeys(name: string): string[] {
+  const trimmed = name.trim();
+  const plain = trimmed.replace(/^\d+:/, "");
+  return plain && plain !== trimmed ? [trimmed, plain] : [trimmed];
+}
+
+/**
+ * Replace planned headways with ones computed from live (or leave-at) board
+ * departures so frequency chips/filters update without a new isochrone plan.
+ */
+export function overlayHeadwaysFromDepartures(
+  plan: DirectPlanResponse | null,
+  departuresByKey: Record<string, StopDeparturesResponse>,
+): DirectPlanResponse | null {
+  if (!plan || !Object.keys(departuresByKey).length) return plan;
+
+  const headwayByKey = new Map<string, number | null>();
+  for (const route of plan.routes) {
+    const key = routeOptionKey(route);
+    const deps = departuresByKey[key];
+    if (!deps) continue;
+    headwayByKey.set(key, headwayFromDepartures(deps));
+  }
+  if (!headwayByKey.size) return plan;
+
+  const routes = plan.routes.map((route) => {
+    const key = routeOptionKey(route);
+    if (!headwayByKey.has(key)) return route;
+    const headwaySeconds = headwayByKey.get(key) ?? null;
+    return {
+      ...route,
+      headwaySeconds,
+      frequencyBucket: headwayToBucket(headwaySeconds),
+    };
+  });
+
+  const bestByStopLine = new Map<string, number>();
+  for (const route of routes) {
+    const key = routeOptionKey(route);
+    if (!headwayByKey.has(key)) continue;
+    const headway = route.headwaySeconds;
+    if (headway == null || !Number.isFinite(headway) || headway <= 0) continue;
+    const type = route.routeType ?? 3;
+    const plain = route.routeShortName?.trim() || route.routeId;
+    const names = lineNameKeys(`${type}:${plain}`);
+    for (const stopId of [route.boardStopId, route.alightStopId]) {
+      for (const name of names) {
+        const lineKey = `${stopId}|${name}`;
+        const prev = bestByStopLine.get(lineKey);
+        if (prev == null || headway < prev) bestByStopLine.set(lineKey, headway);
+      }
+    }
+  }
+
+  const validStops = plan.validStops.map((stop) => {
+    if (!stop.routeFrequencies?.length) return stop;
+    let changed = false;
+    const routeFrequencies = stop.routeFrequencies.map((freq) => {
+      let headway: number | undefined;
+      for (const name of lineNameKeys(freq.routeShortName)) {
+        const found = bestByStopLine.get(`${stop.stopId}|${name}`);
+        if (found != null && (headway == null || found < headway)) headway = found;
+      }
+      if (headway == null) return freq;
+      changed = true;
+      return {
+        ...freq,
+        headwaySeconds: headway,
+        frequencyBucket: headwayToBucket(headway),
+      };
+    });
+    if (!changed) return stop;
+    return withStationFrequency({ ...stop, routeFrequencies });
+  });
+
+  return { ...plan, routes, validStops };
+}
+
 /** @deprecated prefer walkLegsSeconds — kept for call sites that only need the sum. */
 export function totalWalkSeconds(
   route: DirectRoute,
@@ -309,9 +403,12 @@ export function pickMostFrequentRoute(routes: DirectRoute[]): DirectRoute | null
   return best;
 }
 
-export type TotalTimeMaxMinutes = 30 | 45 | 60 | 90;
+export type TotalTimeMaxMinutes = 30 | 45 | 60 | 90 | "all";
 
-export const TOTAL_TIME_MAX_OPTIONS: TotalTimeMaxMinutes[] = [30, 45, 60, 90];
+export const TOTAL_TIME_MAX_OPTIONS: TotalTimeMaxMinutes[] = ["all", 30, 45, 60, 90];
+
+/** Extra walk minutes allowed when "include near-limit" is on. */
+export const NEAR_LIMIT_WALK_MINUTES = 5;
 
 /** True when a route's line headway passes the selected max. "all" keeps every route. */
 export function routePassesMaxFrequency(
@@ -426,15 +523,38 @@ export function dedupeRoutesByBus(
 
 export type ResultFilters = {
   enabledModes: PlanMode[];
-  limitTotalWalk: boolean;
+  /** When true, also keep trips up to NEAR_LIMIT_WALK_MINUTES over the walk budget. */
+  includeNearLimitWalk: boolean;
   origin: { lng: number; lat: number } | null;
   destination: { lng: number; lat: number } | null;
   maxWalkingSeconds: number;
   /** Max headway in minutes (same tiers as pin sizes). */
   maxFrequencyMinutes: FrequencyMaxMinutes;
-  /** Max walk+ride+walk journey time in minutes. */
+  /** Max walk+ride+walk journey time in minutes. "all" = no cap. */
   maxTotalTimeMinutes: TotalTimeMaxMinutes;
 };
+
+/** True when total walk (and each street-adjusted leg) is inside the budget. */
+export function routePassesWalkLimit(
+  route: DirectRoute,
+  origin: { lng: number; lat: number },
+  destination: { lng: number; lat: number },
+  maxWalkingSeconds: number,
+  includeNearLimit: boolean,
+): boolean {
+  const slackSecs = includeNearLimit ? NEAR_LIMIT_WALK_MINUTES * 60 : 0;
+  const maxSecs = maxWalkingSeconds + slackSecs + 0.5;
+  const maxMins = Math.round(maxWalkingSeconds / 60) + (includeNearLimit ? NEAR_LIMIT_WALK_MINUTES : 0);
+  const legs = walkLegsSeconds(route, origin, destination);
+  const total = legs.toBoard + legs.fromAlight;
+  // Street distance is longer than the plan chord; keep each leg inside the budget.
+  return (
+    legs.toBoard * 1.3 <= maxSecs &&
+    legs.fromAlight * 1.3 <= maxSecs &&
+    total <= maxSecs &&
+    walkMinutesDisplayed(total) <= maxMins
+  );
+}
 
 function mergeStopRoles(
   a: ValidStop["role"],
@@ -533,32 +653,22 @@ export function applyResultFilters(
     return modeSet.has(mode);
   });
 
-  if (
-    filters.limitTotalWalk &&
-    filters.origin &&
-    filters.destination
-  ) {
-    // "Walks ≤ N min" = total walking (to board + after alight), matching the slider budget.
-    const maxSecs = filters.maxWalkingSeconds + 0.5;
-    const maxMins = Math.round(filters.maxWalkingSeconds / 60);
-    routes = routes.filter((r) => {
-      const legs = walkLegsSeconds(r, filters.origin!, filters.destination!);
-      const total = legs.toBoard + legs.fromAlight;
-      // Street distance is longer than the plan chord; keep each leg inside the slider.
-      return (
-        legs.toBoard * 1.3 <= maxSecs &&
-        legs.fromAlight * 1.3 <= maxSecs &&
-        total <= maxSecs &&
-        walkMinutesDisplayed(total) <= maxMins
-      );
-    });
-  }
-
   if (filters.origin && filters.destination) {
-    const maxTotal = filters.maxTotalTimeMinutes * 60 + 0.5;
-    routes = routes.filter(
-      (r) => totalJourneySeconds(r, filters.origin!, filters.destination!) <= maxTotal,
+    routes = routes.filter((r) =>
+      routePassesWalkLimit(
+        r,
+        filters.origin!,
+        filters.destination!,
+        filters.maxWalkingSeconds,
+        filters.includeNearLimitWalk,
+      ),
     );
+    if (filters.maxTotalTimeMinutes !== "all") {
+      const maxTotal = filters.maxTotalTimeMinutes * 60 + 0.5;
+      routes = routes.filter(
+        (r) => totalJourneySeconds(r, filters.origin!, filters.destination!) <= maxTotal,
+      );
+    }
     // One card per bus line — keep the fastest board/alight variant.
     routes = dedupeRoutesByBus(routes, filters.origin, filters.destination);
   }
@@ -572,28 +682,16 @@ export function applyResultFilters(
 
   const byId = new Map<string, ValidStop>();
 
-  // When walk-limited or frequency-filtered, only show ends of surviving routes.
-  // Otherwise keep isochrone stops (exploration) and ensure every route has both pins.
-  if (filters.limitTotalWalk || filters.maxFrequencyMinutes !== "all") {
-    for (const stop of stopsFromRoutes(routes)) upsertStop(byId, stop);
-  } else {
-    for (const stop of fullPlan.validStops) {
-      const modes = stop.planModes?.length ? stop.planModes : [fullPlan.mode];
-      if (!modes.some((m) => modeSet.has(m))) continue;
-      upsertStop(byId, stop);
-    }
-    for (const stop of stopsFromRoutes(routes)) upsertStop(byId, stop);
-  }
+  // Walk is always limited (strict or near-limit) — only show ends of surviving routes.
+  for (const stop of stopsFromRoutes(routes)) upsertStop(byId, stop);
 
   let validStops = [...byId.values()];
-  if (filters.limitTotalWalk || filters.maxFrequencyMinutes !== "all") {
-    const routeStopIds = new Set<string>();
-    for (const r of routes) {
-      routeStopIds.add(r.boardStopId);
-      routeStopIds.add(r.alightStopId);
-    }
-    validStops = validStops.filter((s) => routeStopIds.has(s.stopId));
+  const routeStopIds = new Set<string>();
+  for (const r of routes) {
+    routeStopIds.add(r.boardStopId);
+    routeStopIds.add(r.alightStopId);
   }
+  validStops = validStops.filter((s) => routeStopIds.has(s.stopId));
 
   const features = (fullPlan.isochrone.features ?? []).filter((f) => {
     const props = (f.properties ?? {}) as { planMode?: PlanMode };

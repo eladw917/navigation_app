@@ -9,6 +9,15 @@ export const LatLngSchema = z.object({
 });
 export type LatLng = z.infer<typeof LatLngSchema>;
 
+/** ISO-8601 instant (leave-at / clock override). */
+export const IsoInstantSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .refine((value) => !Number.isNaN(Date.parse(value)), {
+    message: "Invalid datetime",
+  });
+
 export const DirectPlanRequestSchema = z.object({
   mode: PlanModeSchema,
   origin: LatLngSchema,
@@ -22,6 +31,8 @@ export const DirectPlanRequestSchema = z.object({
   daysOfWeek: z.array(z.number().int().min(0).max(6)).optional(),
   /** When true, hide lines/stops with no departures in the selected window. */
   filterBySchedule: z.boolean().optional(),
+  /** ISO-8601 instant for “leave at”. Omit to use Israel-local now for frequency. */
+  at: IsoInstantSchema.optional(),
 });
 export type DirectPlanRequest = z.infer<typeof DirectPlanRequestSchema>;
 

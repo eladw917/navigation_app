@@ -277,6 +277,22 @@ function walkingCluster(
   return fallback.filter(isValidLngLat);
 }
 
+function overviewStationIds(
+  features: Array<{ properties: Record<string, string | boolean | number> }>,
+  focus: MapFocus,
+): string[] {
+  const ids: string[] = [];
+  for (const feature of features) {
+    const role = String(feature.properties.role ?? "");
+    const include = focus === "alight" ? role !== "boarding" : role !== "alighting";
+    if (!include) continue;
+    const id = String(feature.properties.stopId ?? "");
+    if (id) ids.push(id);
+  }
+  ids.sort();
+  return ids;
+}
+
 function truncateMapLabel(text: string, max = 28): string {
   const t = text.trim();
   if (t.length <= max) return t;
@@ -337,6 +353,8 @@ type Props = {
   onSelectStop?: (stopId: string | null) => void;
   /** When set, show this departure (schedule picker) if it matches the browsed trip. */
   overrideDeparture?: ScheduledDeparture | null;
+  /** ISO-8601 leave-at instant; omit for live now. */
+  departAtIso?: string;
   onOpenSchedule?: () => void;
   /** When set with limitWalk, stepper cannot pick stops beyond this walk budget (seconds). */
   maxWalkingSeconds?: number | null;
@@ -349,6 +367,8 @@ type Props = {
   walkAmenities?: WalkAmenity[];
   /** Selected amenity type; map/popup list only that category on the station walk. */
   walkAmenityCategory?: WalkAmenityFilter;
+  /** Camera-only recenter (locate FAB). Identity is `id` so the same point can be requested again. */
+  recenterRequest?: { id: number; location: LatLng } | null;
 };
 
 type Station = ValidStop & { distanceMeters: number };
@@ -1211,6 +1231,7 @@ export function TransitMap({
   planning = false,
   onSelectStop,
   overrideDeparture = null,
+  departAtIso,
   onOpenSchedule,
   maxWalkingSeconds: _maxWalkingSeconds = null,
   limitWalk: _limitWalk = false,
@@ -1218,6 +1239,7 @@ export function TransitMap({
   onBrowseRouteChange,
   walkAmenities = [],
   walkAmenityCategory = "any",
+  recenterRequest = null,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
@@ -1779,6 +1801,7 @@ export function TransitMap({
         alightStopId: effectiveAlight.stopId,
         routeShortName: busShortName(busKey),
         routeId,
+        at: departAtIso,
       },
       controller.signal,
     )
@@ -1801,6 +1824,7 @@ export function TransitMap({
     effectiveBoard?.stopId,
     effectiveAlight?.stopId,
     plan?.requestId,
+    departAtIso,
   ]);
 
   const activePopupDeparture = useMemo((): ScheduledDeparture | null => {
@@ -2228,15 +2252,19 @@ export function TransitMap({
     const map = mapRef.current;
     if (!map) return;
 
+    const dropMarker = (markerRef: { current: maplibregl.Marker | null }) => {
+      markerRef.current?.remove();
+      markerRef.current = null;
+    };
+
     const syncMarker = (
       markerRef: { current: maplibregl.Marker | null },
       point: LatLng | null,
       kind: "origin" | "destination",
       label: string | null | undefined,
     ) => {
-      if (!isValidLngLat(point)) {
-        markerRef.current?.remove();
-        markerRef.current = null;
+      if (!isValidLngLat(point) || !map) {
+        dropMarker(markerRef);
         return;
       }
       const nextEl = createEndpointMarkerElement(kind, label);
@@ -2323,16 +2351,28 @@ export function TransitMap({
     }
   });
 
+  const mapIdleHandlerRef = useRef<(() => void) | null>(null);
+
   const whenMapReady = useRef((fn: () => void) => {
     const map = mapRef.current;
     if (!map) return;
+    if (mapIdleHandlerRef.current) {
+      map.off("idle", mapIdleHandlerRef.current);
+      mapIdleHandlerRef.current = null;
+    }
+    const run = () => {
+      mapIdleHandlerRef.current = null;
+      if (mapRef.current !== map) return;
+      fn();
+    };
     // After source updates, isStyleLoaded() can briefly be false and "load" won't
     // fire again — use idle so endpoint markers still refresh after plan clear.
     if (map.isStyleLoaded()) {
-      fn();
+      run();
       return;
     }
-    map.once("idle", fn);
+    mapIdleHandlerRef.current = run;
+    map.once("idle", run);
   });
 
   const focusEndpoints = useRef(() => {
@@ -2725,6 +2765,10 @@ export function TransitMap({
       destinationMarkerRef.current = null;
       walkLabelMarkerRef.current = null;
       amenityPopupRef.current = null;
+      if (mapIdleHandlerRef.current) {
+        map.off("idle", mapIdleHandlerRef.current);
+        mapIdleHandlerRef.current = null;
+      }
       map.remove();
       mapRef.current = null;
     };
@@ -2748,11 +2792,35 @@ export function TransitMap({
     if (!stillThere) clearLineSelection();
   }, [plan, browse?.bus]);
 
+  // Drop A/B pins in the same frame the search fields change — don't wait for map idle.
+  useLayoutEffect(() => {
+    if (!isValidLngLat(origin)) {
+      originMarkerRef.current?.remove();
+      originMarkerRef.current = null;
+    }
+    if (!isValidLngLat(destination)) {
+      destinationMarkerRef.current?.remove();
+      destinationMarkerRef.current = null;
+    }
+  }, [origin, destination]);
+
+  // Changing origin/destination must close any open ride so leftover walks/pins vanish.
+  useEffect(() => {
+    clearLineSelection();
+    fittedPlanId.current = null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- identity is lng/lat, not object
+  }, [origin?.lng, origin?.lat, destination?.lng, destination?.lat]);
+
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-
-    const clearPlanLayers = () => {
+    whenMapReady.current(() => {
+      syncEndpointMarkers.current();
+      if (plan) {
+        walkLabelMarkerRef.current?.remove();
+        walkLabelMarkerRef.current = null;
+        return;
+      }
       const iso = map.getSource("isochrone") as GeoJSONSource | undefined;
       const stops = map.getSource("stops") as GeoJSONSource | undefined;
       const amenities = map.getSource("walk-amenities") as GeoJSONSource | undefined;
@@ -2761,36 +2829,44 @@ export function TransitMap({
       amenities?.setData({ type: "FeatureCollection", features: [] });
       amenityPopupRef.current?.remove();
       amenityPopupRef.current = null;
-      // Keep / draw the pre-plan walking path between selected endpoints.
-      syncWalkPreview.current(true);
-      whenMapReady.current(() => syncEndpointMarkers.current());
-    };
-
-    if (!plan) {
-      whenMapReady.current(clearPlanLayers);
-    } else {
-      // Planned results own the route-line source; hide the pre-plan time chip.
-      walkLabelMarkerRef.current?.remove();
-      walkLabelMarkerRef.current = null;
-    }
-  }, [plan, origin, destination]);
-
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-    whenMapReady.current(() => {
-      syncEndpointMarkers.current();
-      if (plan) return;
       syncWalkPreview.current(true);
       focusEndpoints.current();
     });
-  }, [origin, destination, originLabel, destinationLabel, plan]);
+  }, [plan, origin, destination, originLabel, destinationLabel]);
+
+  useEffect(() => {
+    if (!recenterRequest) return;
+    const map = mapRef.current;
+    const point = recenterRequest.location;
+    if (!map || !isValidLngLat(point)) return;
+    const run = () => {
+      const live = mapRef.current;
+      if (!live) return;
+      live.stop();
+      live.easeTo({
+        center: [point.lng, point.lat],
+        zoom: Math.max(live.getZoom(), 15),
+        duration: 450,
+        essential: true,
+      });
+    };
+    if (map.isStyleLoaded()) {
+      run();
+      return;
+    }
+    map.once("idle", run);
+    return () => {
+      map.off("idle", run);
+    };
+  }, [recenterRequest]);
 
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !plan) return;
 
+    let cancelled = false;
     const apply = () => {
+      if (cancelled || mapRef.current !== map) return;
       const iso = map.getSource("isochrone") as GeoJSONSource | undefined;
       const stops = map.getSource("stops") as GeoJSONSource | undefined;
       const routeLine = map.getSource("route-line") as GeoJSONSource | undefined;
@@ -3011,7 +3087,8 @@ export function TransitMap({
         return;
       }
 
-      const overviewKey = `${plan.requestId}:${overviewFocus}`;
+      const pinSig = overviewStationIds(features, overviewFocus).join("|");
+      const overviewKey = `${plan.requestId}:${overviewFocus}:${pinSig}`;
       if (fittedPlanId.current !== overviewKey) {
         fittedPlanId.current = overviewKey;
         const points: LatLng[] = [];
@@ -3042,6 +3119,9 @@ export function TransitMap({
     };
 
     whenMapReady.current(apply);
+    return () => {
+      cancelled = true;
+    };
   }, [
     plan,
     selectedRoute,

@@ -1,6 +1,7 @@
 import type { PlanMode } from "../api";
 import {
   FREQUENCY_MAX_OPTIONS,
+  NEAR_LIMIT_WALK_MINUTES,
   TOTAL_TIME_MAX_OPTIONS,
   type FrequencyMaxMinutes,
   type TotalTimeMaxMinutes,
@@ -8,14 +9,19 @@ import {
 import { WALK_AMENITY_OPTIONS, type WalkAmenityFilter } from "../walkAmenities";
 import { SelectChip, type SelectChipOption } from "./ui/SelectChip";
 
-type ModeChoice = "both" | PlanMode;
+const ALL_MODES: PlanMode[] = ["walk_transit", "transit_walk"];
+
+const MODE_TOGGLES: { value: PlanMode; label: string }[] = [
+  { value: "walk_transit", label: "Walk → Transit" },
+  { value: "transit_walk", label: "Transit → Walk" },
+];
 
 type Props = {
   enabledModes: PlanMode[];
   onModesChange: (modes: PlanMode[]) => void;
-  limitTotalWalk: boolean;
+  includeNearLimitWalk: boolean;
   walkLimitMinutes: number;
-  onWalkLimitChange: (limit: boolean) => void;
+  onNearLimitWalkChange: (include: boolean) => void;
   maxFrequencyMinutes: FrequencyMaxMinutes;
   onFrequencyChange: (value: FrequencyMaxMinutes) => void;
   maxTotalTimeMinutes: TotalTimeMaxMinutes;
@@ -24,22 +30,14 @@ type Props = {
   onWalkAmenityChange: (value: WalkAmenityFilter) => void;
   /** Live count of options after filters — proves filters are applying. */
   resultCount?: number | null;
-  /** Filters only apply to a computed plan, so they stay inert before one exists. */
-  disabled?: boolean;
 };
-
-const MODE_OPTIONS: SelectChipOption<ModeChoice>[] = [
-  { value: "both", label: "Both modes" },
-  { value: "walk_transit", label: "Walk → Transit" },
-  { value: "transit_walk", label: "Transit → Walk" },
-];
 
 export function FilterBar({
   enabledModes,
   onModesChange,
-  limitTotalWalk,
+  includeNearLimitWalk,
   walkLimitMinutes,
-  onWalkLimitChange,
+  onNearLimitWalkChange,
   maxFrequencyMinutes,
   onFrequencyChange,
   maxTotalTimeMinutes,
@@ -47,14 +45,13 @@ export function FilterBar({
   walkAmenity,
   onWalkAmenityChange,
   resultCount = null,
-  disabled = false,
 }: Props) {
-  const modeValue: ModeChoice =
-    enabledModes.length === 1 ? (enabledModes[0] ?? "both") : "both";
-
-  const walkOptions: SelectChipOption<"any" | "limit">[] = [
-    { value: "limit", label: `≤ ${walkLimitMinutes} min` },
-    { value: "any", label: "Any walk" },
+  const walkOptions: SelectChipOption<"under" | "near">[] = [
+    { value: "under", label: `Under ${walkLimitMinutes} min` },
+    {
+      value: "near",
+      label: `Near-limit (+${NEAR_LIMIT_WALK_MINUTES} min)`,
+    },
   ];
 
   const freqOptions: SelectChipOption<string>[] = FREQUENCY_MAX_OPTIONS.map((mins) => ({
@@ -64,35 +61,49 @@ export function FilterBar({
 
   const totalOptions: SelectChipOption<string>[] = TOTAL_TIME_MAX_OPTIONS.map((mins) => ({
     value: String(mins),
-    label: `${mins} min`,
+    label: mins === "all" ? "Any" : `${mins} min`,
   }));
+
+  function toggleMode(mode: PlanMode) {
+    const selected = enabledModes.includes(mode);
+    if (selected) {
+      if (enabledModes.length === 1) return;
+      onModesChange(enabledModes.filter((m) => m !== mode));
+      return;
+    }
+    onModesChange(ALL_MODES.filter((m) => m === mode || enabledModes.includes(m)));
+  }
 
   return (
     <div className="filter-bar" role="group" aria-label="Result filters">
-      <SelectChip
-        icon="bus"
-        label="Mode"
-        value={modeValue}
-        options={MODE_OPTIONS}
-        disabled={disabled}
-        onChange={(next) =>
-          onModesChange(next === "both" ? ["walk_transit", "transit_walk"] : [next])
-        }
-      />
+      <div className="filter-mode-toggles" role="group" aria-label="Mode">
+        {MODE_TOGGLES.map((mode) => {
+          const selected = enabledModes.includes(mode.value);
+          return (
+            <button
+              key={mode.value}
+              type="button"
+              className={`filter-mode-toggle${selected ? " active" : ""}`}
+              aria-pressed={selected}
+              onClick={() => toggleMode(mode.value)}
+            >
+              {mode.label}
+            </button>
+          );
+        })}
+      </div>
       <SelectChip
         icon="walk"
         label="Total walk"
-        value={limitTotalWalk ? "limit" : "any"}
+        value={includeNearLimitWalk ? "near" : "under"}
         options={walkOptions}
-        disabled={disabled}
-        onChange={(next) => onWalkLimitChange(next === "limit")}
+        onChange={(next) => onNearLimitWalkChange(next === "near")}
       />
       <SelectChip
         icon="signal"
         label="Frequency"
         value={String(maxFrequencyMinutes)}
         options={freqOptions}
-        disabled={disabled}
         onChange={(next) =>
           onFrequencyChange(
             (next === "all" ? "all" : Number(next)) as FrequencyMaxMinutes,
@@ -101,18 +112,20 @@ export function FilterBar({
       />
       <SelectChip
         icon="clock"
-        label="Total time"
+        label="Max journey"
         value={String(maxTotalTimeMinutes)}
         options={totalOptions}
-        disabled={disabled}
-        onChange={(next) => onTotalTimeChange(Number(next) as TotalTimeMaxMinutes)}
+        onChange={(next) =>
+          onTotalTimeChange(
+            (next === "all" ? "all" : Number(next)) as TotalTimeMaxMinutes,
+          )
+        }
       />
       <SelectChip
         icon="shop"
         label="On the walk"
         value={walkAmenity}
         options={WALK_AMENITY_OPTIONS}
-        disabled={disabled}
         onChange={onWalkAmenityChange}
       />
       {resultCount != null ? (

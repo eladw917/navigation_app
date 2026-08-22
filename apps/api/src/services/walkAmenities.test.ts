@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   buildOverpassQuery,
   classifyOsmTags,
+  isOsmFeatureClosed,
   MAX_BBOX_SPAN_DEG,
   validateWalkAmenityBbox,
   walkAmenityCacheKey,
@@ -13,6 +14,7 @@ describe("walkAmenities", () => {
   it("classifies OSM tags into walk-filter categories", () => {
     assert.equal(classifyOsmTags({ amenity: "cafe" }), "cafe");
     assert.equal(classifyOsmTags({ amenity: "ice_cream" }), "cafe");
+    assert.equal(classifyOsmTags({ shop: "coffee" }), "cafe");
     assert.equal(classifyOsmTags({ shop: "supermarket" }), "grocery");
     assert.equal(classifyOsmTags({ shop: "convenience" }), "grocery");
     assert.equal(classifyOsmTags({ shop: "bakery" }), "bakery");
@@ -24,6 +26,24 @@ describe("walkAmenities", () => {
     assert.equal(classifyOsmTags({ leisure: "playground" }), "park");
     assert.equal(classifyOsmTags({ amenity: "parking" }), null);
     assert.equal(classifyOsmTags(undefined), null);
+    assert.equal(classifyOsmTags({ amenity: "cafe", opening_hours: "closed" }), null);
+    assert.equal(classifyOsmTags({ amenity: "cafe", disused: "yes" }), null);
+    assert.equal(classifyOsmTags({ "disused:amenity": "cafe", name: "Old Cafe" }), null);
+    assert.equal(classifyOsmTags({ amenity: "cafe", shop: "vacant" }), null);
+  });
+
+  it("treats OSM closed / vacant / former tags as gone", () => {
+    assert.equal(isOsmFeatureClosed({ amenity: "cafe" }), false);
+    assert.equal(isOsmFeatureClosed({ amenity: "cafe", opening_hours: "Mo-Fr 08:00-18:00" }), false);
+    assert.equal(isOsmFeatureClosed({ amenity: "cafe", opening_hours: "closed" }), true);
+    assert.equal(isOsmFeatureClosed({ amenity: "cafe", opening_hours: "off" }), true);
+    assert.equal(isOsmFeatureClosed({ amenity: "cafe", disused: "yes" }), true);
+    assert.equal(isOsmFeatureClosed({ amenity: "cafe", abandoned: "yes" }), true);
+    assert.equal(isOsmFeatureClosed({ "disused:shop": "convenience" }), true);
+    assert.equal(isOsmFeatureClosed({ shop: "vacant" }), true);
+    assert.equal(isOsmFeatureClosed({ amenity: "cafe", operational_status: "closed" }), true);
+    assert.equal(isOsmFeatureClosed({ amenity: "cafe", end_date: "2020" }), true);
+    assert.equal(isOsmFeatureClosed({ amenity: "cafe", end_date: "2099-01-01" }), false);
   });
 
   it("rejects inverted, oversized, or non-Israel bounding boxes", () => {
@@ -55,7 +75,10 @@ describe("walkAmenities", () => {
     assert.match(query, /32\.07,34\.77,32\.09,34\.79/);
     assert.match(query, /amenity/);
     assert.match(query, /supermarket/);
+    assert.match(query, /coffee/);
     assert.match(query, /leisure/);
+    assert.match(query, /opening_hours"!="closed"/);
+    assert.match(query, /disused"!="yes"/);
     assert.match(query, /out center/);
   });
 
@@ -80,6 +103,13 @@ describe("walkAmenities", () => {
         lat: 32.082,
         lon: 34.782,
         tags: { amenity: "parking" },
+      },
+      {
+        type: "node",
+        id: 4,
+        lat: 32.083,
+        lon: 34.783,
+        tags: { amenity: "cafe", name: "Gone", opening_hours: "closed" },
       },
     ]);
     assert.equal(amenities.length, 2);

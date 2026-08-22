@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { searchPlaces, type LatLng, type PlaceResult } from "../api";
+import { resolveCurrentLocation } from "../currentLocation";
 import { shortPlaceLabel } from "../formatPlace";
 import {
   filterPlaceHistory,
@@ -7,6 +8,7 @@ import {
   rememberPlace,
   type CachedPlace,
 } from "../placeHistory";
+import { Icon } from "./ui/Icon";
 
 type Props = {
   label: string;
@@ -38,6 +40,7 @@ export function PlaceInput({
   const [history, setHistory] = useState<CachedPlace[]>(() => loadPlaceHistory());
   const [historyFilter, setHistoryFilter] = useState("");
   const [loading, setLoading] = useState(false);
+  const [locating, setLocating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -53,8 +56,7 @@ export function PlaceInput({
     return filterPlaceHistory(q, history);
   }, [historyFilter, history]);
 
-  const showMenu =
-    open && (cachedMatches.length > 0 || loading || results.length > 0 || Boolean(error));
+  const showMenu = open;
 
   useEffect(() => {
     if (editingRef.current) return;
@@ -89,7 +91,7 @@ export function PlaceInput({
       setResults([]);
       setError(null);
       setHistoryFilter("");
-      setOpen(false);
+      setOpen(true);
       return;
     }
 
@@ -149,6 +151,7 @@ export function PlaceInput({
     abortRef.current?.abort();
     requestIdRef.current += 1;
     setLoading(false);
+    setLocating(false);
     setHistory(rememberPlace(place));
     onSelect({ label: place.label, location: place.location });
     setQuery(place.label);
@@ -170,31 +173,41 @@ export function PlaceInput({
     commitPlace(place);
   }
 
+  async function pickCurrentLocation() {
+    editingRef.current = true;
+    setOpen(true);
+    setLocating(true);
+    setError(null);
+    try {
+      const place = await resolveCurrentLocation();
+      commitPlace({ ...place, id: "current-location" });
+    } catch (err) {
+      console.error("[geolocation]", err);
+      setLocating(false);
+      setError(
+        err instanceof Error ? err.message : "Could not get your location",
+      );
+    }
+  }
+
   function onInputFocus() {
     editingRef.current = true;
     setHistory(loadPlaceHistory());
-    // Focus alone does not open an empty Recent list — wait for typed text matches
-    // or a search. Keep menu open if query already has matching recents / results.
     const filter = query === valueLabel ? "" : query;
     setHistoryFilter(filter);
+    setOpen(true);
     if (filter.trim().length >= 3) {
       runSearch(filter.trim());
       return;
     }
-    const matches = filter.trim() ? filterPlaceHistory(filter, loadPlaceHistory()) : [];
-    if (matches.length > 0) {
-      setOpen(true);
-      setResults([]);
-      setError(null);
-      setLoading(false);
-    } else {
-      setOpen(false);
-    }
+    setResults([]);
+    if (!locating) setError(null);
+    setLoading(false);
   }
 
   return (
     <div
-      className={["place-input", endpoint, embedded ? "embedded" : ""]
+      className={["place-input", endpoint, embedded ? "embedded" : "", showMenu ? "menu-open" : ""]
         .filter(Boolean)
         .join(" ")}
       ref={wrapRef}
@@ -202,7 +215,7 @@ export function PlaceInput({
       <label>
         <span className="sr-only">
           {label}
-          {loading ? " Searching…" : ""}
+          {loading ? " Searching…" : locating ? " Getting location…" : ""}
         </span>
         <div className="place-field">
           {!embedded ? <span className="place-marker" aria-hidden /> : null}
@@ -211,7 +224,7 @@ export function PlaceInput({
             onChange={(e) => onChange(e.target.value)}
             onFocus={onInputFocus}
             onClick={onInputFocus}
-            placeholder={placeholder}
+            placeholder={locating ? "Getting location…" : placeholder}
             autoComplete="off"
           />
           {valueLabel || query ? (
@@ -235,6 +248,28 @@ export function PlaceInput({
       {error && !showMenu ? <p className="field-error">{error}</p> : null}
       {showMenu ? (
         <ul className="place-results" role="listbox" aria-label="Place suggestions">
+          <li className="place-current">
+            <button
+              type="button"
+              disabled={locating}
+              onPointerDown={(e) => {
+                if (e.button !== 0) return;
+                e.preventDefault();
+                void pickCurrentLocation();
+              }}
+            >
+              <span className="place-current-icon" aria-hidden>
+                {locating ? (
+                  <span className="spinner" />
+                ) : (
+                  <Icon name="locate" size={16} />
+                )}
+              </span>
+              <span className="place-current-text">
+                <strong>{locating ? "Getting location…" : "Current location"}</strong>
+              </span>
+            </button>
+          </li>
           {cachedMatches.length > 0 ? (
             <>
               <li className="place-results-heading">Recent</li>

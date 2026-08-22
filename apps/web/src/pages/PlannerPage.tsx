@@ -5,7 +5,6 @@ import {
   fetchTripPath,
   fetchWalkAmenities,
   planDirect,
-  reversePlace,
   type DirectPlanResponse,
   type DirectRoute,
   type LatLng,
@@ -19,22 +18,21 @@ import { FilterBar } from "../components/FilterBar";
 import { PlaceInput } from "../components/PlaceInput";
 import { RouteResults } from "../components/RouteResults";
 import { SelectedRoutePanel } from "../components/SelectedRoutePanel";
-import { ScheduleFilters, type ScheduleFilter } from "../components/ScheduleFilters";
 import { TransitMap } from "../components/TransitMap";
+import { WhenPicker } from "../components/WhenPicker";
 import { Icon } from "../components/ui/Icon";
 import { SelectChip } from "../components/ui/SelectChip";
-import { shortPlaceLabel } from "../formatPlace";
+import { getCurrentPosition, resolveCurrentLocation } from "../currentLocation";
+import { departAtIso } from "../departAt";
 import {
   applyResultFilters,
   filterPlanByCatchableDepartures,
   filterPlanByModes,
-  FREQUENCY_MAX_OPTIONS,
-  modeLabel,
+  overlayHeadwaysFromDepartures,
   roundedWalkSeconds,
   routeBadgeLabel,
   routeOptionKey,
   totalJourneySeconds,
-  TOTAL_TIME_MAX_OPTIONS,
   walkEstimateBetween,
   walkLegsSeconds,
   type FrequencyMaxMinutes,
@@ -66,13 +64,6 @@ const WALK_MINUTE_OPTIONS = [5, 10, 15, 20, 25, 30];
 /** Straight-line limit — beyond this, transit planning is not offered. */
 const MAX_PLAN_DISTANCE_METERS = 20_000;
 
-const DEFAULT_SCHEDULE: ScheduleFilter = {
-  hoursStart: 6,
-  hoursEnd: 22,
-  daysOfWeek: [0, 1, 2, 3, 4, 5, 6],
-  active: false,
-};
-
 function readInitialShare(): ParsedPlanUrl | null {
   if (typeof window === "undefined") return null;
   if (isDemoUrl()) return null;
@@ -92,16 +83,16 @@ export function PlannerPage() {
   );
   /** Modes visible after planning; both on by default. */
   const [enabledModes, setEnabledModes] = useState<PlanMode[]>([...ALL_MODES]);
-  /** When on, hide options where walk-to-board or walk-after exceeds max walking time. */
-  const [limitTotalWalk, setLimitTotalWalk] = useState(true);
+  /** When on, also keep trips a few minutes over the walk budget. */
+  const [includeNearLimitWalk, setIncludeNearLimitWalk] = useState(false);
   /** When on, hide options with no catchable departure within ~3 hours. Off by default. */
   const [limitSoonDepartures, setLimitSoonDepartures] = useState(false);
   /** Max station headway (min); same tiers as pin sizes. Default all = no filter. */
   const [maxFrequencyMinutes, setMaxFrequencyMinutes] =
     useState<FrequencyMaxMinutes>("all");
-  /** Max walk+ride+walk journey time. */
+  /** Max walk+ride+walk journey time. Default any = no cap. */
   const [maxTotalTimeMinutes, setMaxTotalTimeMinutes] =
-    useState<TotalTimeMaxMinutes>(90);
+    useState<TotalTimeMaxMinutes>("all");
   /** OSM amenity that must sit on the walk-to-stop / walk-from-stop path. */
   const [walkAmenity, setWalkAmenity] = useState<WalkAmenityFilter>("any");
   const [walkAmenities, setWalkAmenities] = useState<WalkAmenity[]>([]);
@@ -115,7 +106,8 @@ export function PlannerPage() {
   const [committedMinutes, setCommittedMinutes] = useState(
     () => initialShare?.walkMinutes ?? 15,
   );
-  const [schedule, setSchedule] = useState<ScheduleFilter>(DEFAULT_SCHEDULE);
+  /** null = leave now (live Israel clock). */
+  const [departAt, setDepartAt] = useState<Date | null>(null);
   const [selectedRoute, setSelectedRoute] = useState<DirectRoute | null>(null);
   const [departuresByKey, setDeparturesByKey] = useState<
     Record<string, StopDeparturesResponse>
@@ -129,6 +121,12 @@ export function PlannerPage() {
   const [instanceLoading, setInstanceLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [locating, setLocating] = useState(false);
+  const [mapLocating, setMapLocating] = useState(false);
+  const [mapRecenter, setMapRecenter] = useState<{
+    id: number;
+    location: LatLng;
+  } | null>(null);
+  const mapRecenterId = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [apiOk, setApiOk] = useState<boolean | null>(null);
   const [demoMode, setDemoMode] = useState(() => isDemoUrl());
@@ -158,22 +156,49 @@ export function PlannerPage() {
   const tooFarToPlan =
     odDistanceMeters != null && odDistanceMeters > MAX_PLAN_DISTANCE_METERS;
 
-  /** Walk / mode / time filters — departures are fetched for these routes. */
-  const basePlan = useMemo(
+  const filterInputs = {
+    enabledModes,
+    includeNearLimitWalk,
+    origin: origin?.location ?? null,
+    destination: destination?.location ?? null,
+    maxWalkingSeconds: committedMinutes * 60,
+    maxTotalTimeMinutes,
+  };
+
+  /** Routes to fetch departures for — frequency is applied after overlay. */
+  const preFreqPlan = useMemo(
     () =>
       applyResultFilters(fullPlan, {
-        enabledModes,
-        limitTotalWalk,
-        origin: origin?.location ?? null,
-        destination: destination?.location ?? null,
-        maxWalkingSeconds: committedMinutes * 60,
-        maxFrequencyMinutes,
-        maxTotalTimeMinutes,
+        ...filterInputs,
+        maxFrequencyMinutes: "all",
       }),
     [
       fullPlan,
       enabledModes,
-      limitTotalWalk,
+      includeNearLimitWalk,
+      origin?.location,
+      destination?.location,
+      committedMinutes,
+      maxTotalTimeMinutes,
+    ],
+  );
+
+  const timedPlan = useMemo(
+    () => overlayHeadwaysFromDepartures(fullPlan, departuresByKey),
+    [fullPlan, departuresByKey],
+  );
+
+  /** Walk / mode / time filters — frequency uses leave-at overlay when loaded. */
+  const basePlan = useMemo(
+    () =>
+      applyResultFilters(timedPlan, {
+        ...filterInputs,
+        maxFrequencyMinutes,
+      }),
+    [
+      timedPlan,
+      enabledModes,
+      includeNearLimitWalk,
       origin?.location,
       destination?.location,
       committedMinutes,
@@ -202,13 +227,16 @@ export function PlannerPage() {
   );
 
   const routeKeysSig = useMemo(
-    () => (basePlan?.routes ?? []).map(routeOptionKey).join("|"),
-    [basePlan?.routes],
+    () => (preFreqPlan?.routes ?? []).map(routeOptionKey).join("|"),
+    [preFreqPlan?.routes],
   );
 
+  const departAtIsoValue = departAtIso(departAt);
+  const departuresQuerySig = `${departAtIsoValue ?? "now"}|${routeKeysSig}`;
+
   const departuresReady =
-    !basePlan?.routes.length ||
-    (!departuresLoading && departuresFetchedSig === routeKeysSig);
+    !preFreqPlan?.routes.length ||
+    (!departuresLoading && departuresFetchedSig === departuresQuerySig);
 
   /** Optional: after departures load, keep only options with a catchable departure soon. */
   const plan = useMemo(() => {
@@ -230,12 +258,27 @@ export function PlannerPage() {
   ]);
 
   useEffect(() => {
-    fetchHealth()
-      .then((h) => setApiOk(h.status === "ok" && h.database))
-      .catch((err) => {
-        console.error("[health]", err);
-        setApiOk(false);
-      });
+    let cancelled = false;
+    let timer: number | undefined;
+    const check = () => {
+      fetchHealth()
+        .then((h) => {
+          if (cancelled) return;
+          setApiOk(h.status === "ok" && h.database);
+          timer = window.setTimeout(check, 15_000);
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          console.error("[health]", err);
+          setApiOk(false);
+          timer = window.setTimeout(check, 3_000);
+        });
+    };
+    check();
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
   }, []);
 
   // Default origin to the device location once — user can clear / change it.
@@ -245,31 +288,18 @@ export function PlannerPage() {
     if (initialShare?.origin) return;
     let cancelled = false;
     setLocating(true);
-    navigator.geolocation.getCurrentPosition(
-      async (pos) => {
+    void resolveCurrentLocation()
+      .then((place) => {
         if (cancelled) return;
-        const location = { lng: pos.coords.longitude, lat: pos.coords.latitude };
-        try {
-          const { results } = await reversePlace(location);
-          if (cancelled) return;
-          const label = results[0] ? shortPlaceLabel(results[0]) : "Current location";
-          selectOrigin({ label, location });
-        } catch (err) {
-          if (cancelled) return;
-          console.error("[reverse]", err);
-          selectOrigin({ label: "Current location", location });
-        } finally {
-          if (!cancelled) setLocating(false);
-        }
-      },
-      (err) => {
+        selectOrigin(place);
+      })
+      .catch((err) => {
         if (cancelled) return;
         console.warn("[geolocation]", err);
-        // Leave origin empty so the user can pick a starting point.
-        setLocating(false);
-      },
-      { enableHighAccuracy: true, timeout: 10000 },
-    );
+      })
+      .finally(() => {
+        if (!cancelled) setLocating(false);
+      });
     return () => {
       cancelled = true;
     };
@@ -334,7 +364,7 @@ export function PlannerPage() {
     departuresAbortRef.current?.abort();
     setActiveDeparture(null);
     setInstancePath(null);
-    if (!basePlan?.routes.length) {
+    if (!preFreqPlan?.routes.length) {
       setDeparturesByKey({});
       setDeparturesLoading(false);
       setDeparturesFetchedSig("");
@@ -344,8 +374,8 @@ export function PlannerPage() {
     const controller = new AbortController();
     departuresAbortRef.current = controller;
     setDeparturesLoading(true);
-    const routes = basePlan.routes;
-    const fetchSig = routes.map(routeOptionKey).join("|");
+    const routes = preFreqPlan.routes;
+    const fetchSig = `${departAtIsoValue ?? "now"}|${routes.map(routeOptionKey).join("|")}`;
     void Promise.all(
       routes.map(async (route) => {
         const key = routeOptionKey(route);
@@ -356,6 +386,7 @@ export function PlannerPage() {
               alightStopId: route.alightStopId,
               routeShortName: route.routeShortName ?? route.routeId,
               routeId: route.routeId,
+              at: departAtIsoValue,
             },
             controller.signal,
           );
@@ -379,7 +410,7 @@ export function PlannerPage() {
       setDeparturesFetchedSig(fetchSig);
     });
     return () => controller.abort();
-  }, [basePlan?.requestId, routeKeysSig, demoMode]);
+  }, [preFreqPlan?.requestId, routeKeysSig, demoMode, departAtIsoValue]);
 
   useEffect(() => {
     if (!fullPlan || demoMode) {
@@ -564,20 +595,6 @@ export function PlannerPage() {
     setInstancePath(null);
   }
 
-  function toggleMode(mode: PlanMode) {
-    setEnabledModes((prev) => {
-      if (prev.includes(mode)) {
-        if (prev.length === 1) return prev;
-        return prev.filter((m) => m !== mode);
-      }
-      return ALL_MODES.filter((m) => m === mode || prev.includes(m));
-    });
-  }
-
-  function toggleTotalWalkLimit() {
-    setLimitTotalWalk((prev) => !prev);
-  }
-
   function loadDemo() {
     const demo = buildDemoState();
     abortRef.current?.abort();
@@ -650,7 +667,7 @@ export function PlannerPage() {
     });
   }, [origin, destination, committedMinutes, selectedRoute, demoMode, loading]);
 
-  async function runPlan(minutes = committedMinutes, scheduleOverride?: ScheduleFilter) {
+  async function runPlan(minutes = committedMinutes) {
     if (!origin || !destination) {
       setError("Choose both origin and destination");
       return;
@@ -662,7 +679,6 @@ export function PlannerPage() {
     }
     if (demoMode) setDemoMode(false);
     setSheetExpanded(false);
-    const sched = scheduleOverride ?? schedule;
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -681,17 +697,14 @@ export function PlannerPage() {
       maxWalkingSeconds: minutes * 60,
       origin: origin.location,
       destination: destination.location,
-      schedule: sched,
+      at: departAtIsoValue,
     });
     try {
       const shared = {
         origin: origin.location,
         destination: destination.location,
         maxWalkingSeconds: minutes * 60,
-        hoursStart: sched.hoursStart,
-        hoursEnd: sched.hoursEnd,
-        daysOfWeek: sched.daysOfWeek,
-        filterBySchedule: sched.active,
+        at: departAtIsoValue,
       };
       // Load both directions together so the first rendered map already contains
       // both walking areas and their pins.
@@ -707,10 +720,10 @@ export function PlannerPage() {
         transit_walk: transitWalk,
       });
       setEnabledModes([...ALL_MODES]);
-      setLimitTotalWalk(true);
+      setIncludeNearLimitWalk(false);
       setLimitSoonDepartures(false);
       setMaxFrequencyMinutes("all");
-      setMaxTotalTimeMinutes(90);
+      setMaxTotalTimeMinutes("all");
       console.info("[plan] both modes ok", {
         walkTransit: {
           stops: walkTransit.meta.validStopCount,
@@ -743,47 +756,44 @@ export function PlannerPage() {
     setLoading(false);
   }
 
-  function selectOrigin(place: { label: string; location: LatLng }) {
-    rememberPlace(place);
+  function forgetTrip() {
     cancelInFlightPlan();
-    setOrigin(place);
     setPlansByMode({});
     setSelectedRoute(null);
+    setMapLineActive(false);
+    setActiveDeparture(null);
+    setInstancePath(null);
     setError(null);
+    setSheetExpanded(false);
+    userPickedDepartureRef.current = false;
+  }
+
+  function selectOrigin(place: { label: string; location: LatLng }) {
+    rememberPlace(place);
+    forgetTrip();
+    setOrigin(place);
   }
 
   function selectDestination(place: { label: string; location: LatLng }) {
     rememberPlace(place);
-    cancelInFlightPlan();
+    forgetTrip();
     setDestination(place);
-    setPlansByMode({});
-    setSelectedRoute(null);
-    setError(null);
   }
 
   function clearOrigin() {
-    cancelInFlightPlan();
+    forgetTrip();
     setOrigin(null);
-    setPlansByMode({});
-    setSelectedRoute(null);
-    setError(null);
   }
 
   function clearDestination() {
-    cancelInFlightPlan();
+    forgetTrip();
     setDestination(null);
-    setPlansByMode({});
-    setSelectedRoute(null);
-    setError(null);
   }
 
   function swapEndpoints() {
-    cancelInFlightPlan();
+    forgetTrip();
     setOrigin(destination);
     setDestination(origin);
-    setPlansByMode({});
-    setSelectedRoute(null);
-    setError(null);
   }
 
   function startNewQuery() {
@@ -801,14 +811,14 @@ export function PlannerPage() {
     setError(null);
     setLoading(false);
     setEnabledModes([...ALL_MODES]);
-    setLimitTotalWalk(true);
+    setIncludeNearLimitWalk(false);
     setLimitSoonDepartures(false);
     setMaxFrequencyMinutes("all");
-    setMaxTotalTimeMinutes(90);
+    setMaxTotalTimeMinutes("all");
     setWalkAmenity("any");
     setWalkAmenities([]);
     setWalkAmenityStatus("idle");
-    setSchedule(DEFAULT_SCHEDULE);
+    setDepartAt(null);
     setSheetExpanded(false);
     setMapLineActive(false);
     userPickedDepartureRef.current = false;
@@ -824,41 +834,27 @@ export function PlannerPage() {
     startNewQuery();
   }
 
-  function handleScheduleChange(next: ScheduleFilter) {
-    setSchedule(next);
-    if (!origin || !destination || !Object.keys(plansByMode).length) return;
-    void runPlan(committedMinutes, next);
+  function handleDepartAtChange(next: Date | null) {
+    userPickedDepartureRef.current = false;
+    setDepartAt(next);
   }
 
-  async function useMyLocation() {
+  async function focusMapOnMyLocation() {
     if (!navigator.geolocation) {
       setError("Location is not available in this browser");
       return;
     }
-    setLocating(true);
-    navigator.geolocation.getCurrentPosition(
-      async (pos) => {
-        const location = { lng: pos.coords.longitude, lat: pos.coords.latitude };
-        try {
-          const { results } = await reversePlace(location);
-          const label = results[0]
-            ? shortPlaceLabel(results[0])
-            : "Current location";
-          selectOrigin({ label, location });
-        } catch (err) {
-          console.error("[reverse]", err);
-          selectOrigin({ label: "Current location", location });
-        } finally {
-          setLocating(false);
-        }
-      },
-      (err) => {
-        console.error("[geolocation]", err);
-        setError("Could not get your location");
-        setLocating(false);
-      },
-      { enableHighAccuracy: true, timeout: 10000 },
-    );
+    setMapLocating(true);
+    try {
+      const location = await getCurrentPosition();
+      mapRecenterId.current += 1;
+      setMapRecenter({ id: mapRecenterId.current, location });
+    } catch (err) {
+      console.error("[geolocation]", err);
+      setError("Could not get your location");
+    } finally {
+      setMapLocating(false);
+    }
   }
 
   return (
@@ -893,10 +889,17 @@ export function PlannerPage() {
               </p>
             </div>
             <div className="trip-summary-meta">
-              <span className="trip-summary-param">
-                <Icon name="walk" size={13} />
-                ≤{committedMinutes} min
-              </span>
+              <div className="trip-summary-params">
+                <span className="trip-summary-param">
+                  <Icon name="walk" size={13} />
+                  ≤{committedMinutes} min
+                </span>
+                <WhenPicker
+                  value={departAt}
+                  onChange={handleDepartAtChange}
+                  variant="summary"
+                />
+              </div>
               <button type="button" className="trip-summary-new" onClick={planNewTrip}>
                 Plan a new trip
               </button>
@@ -949,6 +952,7 @@ export function PlannerPage() {
             ) : null}
 
             <div className="search-card-actions">
+              <WhenPicker value={departAt} onChange={handleDepartAtChange} />
               <SelectChip
                 icon="walk"
                 label="Max walk"
@@ -982,26 +986,22 @@ export function PlannerPage() {
       </header>
 
       <main className="map-pane">
-        {!selectedRoute && !mapLineActive ? (
+        {isAdjusting && !selectedRoute && !mapLineActive ? (
           <div className="map-chrome">
             <FilterBar
               enabledModes={enabledModes}
               onModesChange={setEnabledModes}
-              limitTotalWalk={limitTotalWalk}
+              includeNearLimitWalk={includeNearLimitWalk}
               walkLimitMinutes={committedMinutes}
-              onWalkLimitChange={setLimitTotalWalk}
+              onNearLimitWalkChange={setIncludeNearLimitWalk}
               maxFrequencyMinutes={maxFrequencyMinutes}
               onFrequencyChange={setMaxFrequencyMinutes}
               maxTotalTimeMinutes={maxTotalTimeMinutes}
               onTotalTimeChange={setMaxTotalTimeMinutes}
               walkAmenity={walkAmenity}
               onWalkAmenityChange={setWalkAmenity}
-              resultCount={isAdjusting ? (plan?.routes.length ?? 0) : null}
-              disabled={!isAdjusting}
+              resultCount={plan?.routes.length ?? 0}
             />
-            {isAdjusting ? (
-              <ScheduleFilters value={schedule} onChange={handleScheduleChange} />
-            ) : null}
           </div>
         ) : null}
 
@@ -1020,8 +1020,9 @@ export function PlannerPage() {
           selectedRoute={isAdjusting ? mapSelectedRoute : null}
           planning={loading}
           overrideDeparture={activeDeparture}
-          limitWalk={limitTotalWalk}
+          departAtIso={departAtIsoValue}
           maxWalkingSeconds={committedMinutes * 60}
+          recenterRequest={mapRecenter}
           onLineActiveChange={setMapLineActive}
           onBrowseRouteChange={handleBrowseRoute}
           onOpenSchedule={
@@ -1037,13 +1038,13 @@ export function PlannerPage() {
         <button
           type="button"
           className="locate-fab"
-          aria-label="Use my location as origin"
-          disabled={locating}
+          aria-label="Focus map on current location"
+          disabled={mapLocating}
           onClick={() => {
-            void useMyLocation();
+            void focusMapOnMyLocation();
           }}
         >
-          {locating ? <span className="spinner" aria-hidden /> : <Icon name="locate" size={20} />}
+          {mapLocating ? <span className="spinner" aria-hidden /> : <Icon name="locate" size={20} />}
         </button>
       </main>
 
