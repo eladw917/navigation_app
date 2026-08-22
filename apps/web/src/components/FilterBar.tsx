@@ -22,8 +22,6 @@ type Props = {
   onTotalTimeChange: (value: TotalTimeMaxMinutes) => void;
   walkAmenity: WalkAmenityFilter;
   onWalkAmenityChange: (value: WalkAmenityFilter) => void;
-  /** Overpass amenities must be loaded before this filter can apply. */
-  walkAmenityDisabled?: boolean;
   /** Live count of options after filters — proves filters are applying. */
   resultCount?: number | null;
   /** Filters only apply to a computed plan, so they stay inert before one exists. */
@@ -48,7 +46,6 @@ export function FilterBar({
   onTotalTimeChange,
   walkAmenity,
   onWalkAmenityChange,
-  walkAmenityDisabled = false,
   resultCount = null,
   disabled = false,
 }: Props) {
@@ -115,7 +112,7 @@ export function FilterBar({
         label="On the walk"
         value={walkAmenity}
         options={WALK_AMENITY_OPTIONS}
-        disabled={disabled || walkAmenityDisabled}
+        disabled={disabled}
         onChange={onWalkAmenityChange}
       />
       {resultCount != null ? (

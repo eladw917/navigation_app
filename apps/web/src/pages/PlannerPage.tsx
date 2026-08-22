@@ -996,7 +996,6 @@ export function PlannerPage() {
               onTotalTimeChange={setMaxTotalTimeMinutes}
               walkAmenity={walkAmenity}
               onWalkAmenityChange={setWalkAmenity}
-              walkAmenityDisabled={walkAmenityStatus !== "ready"}
               resultCount={isAdjusting ? (plan?.routes.length ?? 0) : null}
               disabled={!isAdjusting}
             />
