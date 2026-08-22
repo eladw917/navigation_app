@@ -239,6 +239,60 @@ export async function resolveTripPath(
   return apiGet<TripPathResponse>(`/v1/trips/resolve-path?${params}`, signal);
 }
 
+export type WalkAmenityCategory = "cafe" | "grocery" | "bakery" | "pharmacy" | "atm" | "park";
+
+export type WalkAmenity = {
+  id: string;
+  name: string;
+  category: WalkAmenityCategory;
+  lng: number;
+  lat: number;
+};
+
+export async function fetchWalkAmenities(
+  bbox: { south: number; west: number; north: number; east: number },
+  signal?: AbortSignal,
+): Promise<{ amenities: WalkAmenity[] }> {
+  const params = new URLSearchParams({
+    south: String(bbox.south),
+    west: String(bbox.west),
+    north: String(bbox.north),
+    east: String(bbox.east),
+  });
+  return apiGet<{ amenities: WalkAmenity[] }>(`/v1/walk-amenities?${params}`, signal);
+}
+
+export type WalkRouteResponse = {
+  from: LatLng;
+  to: LatLng;
+  distanceMeters: number;
+  durationSeconds: number;
+  geometry: {
+    type: "LineString";
+    coordinates: [number, number][];
+  };
+  meta: {
+    cached: boolean;
+    approximated: boolean;
+    elapsedMs: number;
+    source: "ors" | "straight_line";
+  };
+};
+
+export async function fetchWalkRoute(
+  from: LatLng,
+  to: LatLng,
+  signal?: AbortSignal,
+): Promise<WalkRouteResponse> {
+  const params = new URLSearchParams({
+    fromLng: String(from.lng),
+    fromLat: String(from.lat),
+    toLng: String(to.lng),
+    toLat: String(to.lat),
+  });
+  return apiGet<WalkRouteResponse>(`/v1/walk-route?${params}`, signal);
+}
+
 export async function fetchBoardDepartures(
   input: {
     stopId: string;

@@ -11,7 +11,8 @@ type IconName =
   | "swap"
   | "locate"
   | "leaf"
-  | "share";
+  | "share"
+  | "shop";
 
 type Props = {
   name: IconName;
@@ -73,6 +74,13 @@ const PATHS: Record<IconName, ReactNode> = {
       <circle cx="6" cy="12" r="2.5" />
       <circle cx="18" cy="19" r="2.5" />
       <path d="M8.2 10.8 15.8 6.2M8.2 13.2l7.6 4.6" />
+    </>
+  ),
+  shop: (
+    <>
+      <path d="M4 10 6.2 4h11.6L20 10" />
+      <path d="M4 10h16v10H4z" />
+      <path d="M9 20v-6h6v6" />
     </>
   ),
 };

@@ -6,6 +6,7 @@ import type {
   ScheduledDeparture,
   StopDeparturesResponse,
   TripPathResponse,
+  WalkAmenity,
 } from "../api";
 import { buildItineraryText, copyText } from "../exportItinerary";
 import { formatHeadway } from "../frequency";
@@ -22,7 +23,12 @@ import {
   totalJourneySeconds,
   walkLegsSeconds,
 } from "../mergePlans";
+import {
+  amenitiesAlongRouteWalks,
+  type WalkAmenityFilter,
+} from "../walkAmenities";
 import { Icon } from "./ui/Icon";
+import { WalkAmenityList } from "./WalkAmenityList";
 
 type Props = {
   route: DirectRoute;
@@ -41,6 +47,8 @@ type Props = {
   instanceLoading: boolean;
   onBack: () => void;
   showMode?: boolean;
+  walkAmenities?: WalkAmenity[];
+  walkAmenityCategory?: WalkAmenityFilter;
 };
 
 type MenuPos = { top: number; left: number };
@@ -214,10 +222,22 @@ export function SelectedRoutePanel({
   instanceLoading,
   onBack,
   showMode = false,
+  walkAmenities = [],
+  walkAmenityCategory = "any",
 }: Props) {
   const walks = walkLegsSeconds(route, origin, destination);
   const total = totalJourneySeconds(route, origin, destination);
   const walkToBoardSecs = roundedWalkSeconds(walks.toBoard);
+  const amenitiesOnWalk =
+    walkAmenityCategory === "any"
+      ? []
+      : amenitiesAlongRouteWalks(
+          [route],
+          walkAmenities,
+          walkAmenityCategory,
+          origin,
+          destination,
+        );
   const nextDep =
     activeDeparture ??
     pickNextCatchableDeparture(departures?.departures, departures?.nowSecs, walkToBoardSecs);
@@ -305,6 +325,7 @@ export function SelectedRoutePanel({
             <span className="route-mode muted tiny">{modeLabel(route.planMode)}</span>
           ) : null}
         </div>
+        <WalkAmenityList amenities={amenitiesOnWalk} category={walkAmenityCategory} />
       </article>
 
       {scheduleExpanded ? (

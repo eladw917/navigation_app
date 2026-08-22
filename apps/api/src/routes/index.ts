@@ -10,6 +10,8 @@ import {
   PlanModeSchema,
   StopDeparturesResponseSchema,
   TripPathResponseSchema,
+  WalkAmenitiesResponseSchema,
+  WalkRouteResponseSchema,
   isInsideIsrael,
 } from "@navigation/contracts";
 import type { FastifyInstance } from "fastify";
@@ -21,6 +23,8 @@ import { getBoardDepartures } from "../services/departures.js";
 import { reverseGeocode, searchPlaces } from "../services/geocoder.js";
 import { planDirect } from "../services/planner.js";
 import { getTripPath, resolveTripPath } from "../services/tripPath.js";
+import { fetchWalkingRoute } from "../services/orsDirections.js";
+import { fetchWalkAmenities, validateWalkAmenityBbox } from "../services/walkAmenities.js";
 
 const GtfsId = z.string().min(1).max(128);
 const RouteShortName = z.string().min(1).max(32);
@@ -110,6 +114,113 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       try {
         const results = await searchPlaces(q, limit, controller.signal);
         return PlaceSearchResponseSchema.parse({ results });
+      } finally {
+        request.raw.off("aborted", onAborted);
+      }
+    },
+  );
+
+  app.get(
+    "/v1/walk-route",
+    {
+      config: { rateLimit: RATE_LIMIT_SEARCH },
+      schema: {
+        querystring: z.object({
+          fromLng: z.coerce.number(),
+          fromLat: z.coerce.number(),
+          toLng: z.coerce.number(),
+          toLat: z.coerce.number(),
+        }),
+      },
+    },
+    async (request, reply) => {
+      const query = request.query as {
+        fromLng: number;
+        fromLat: number;
+        toLng: number;
+        toLat: number;
+      };
+      const from = { lng: query.fromLng, lat: query.fromLat };
+      const to = { lng: query.toLng, lat: query.toLat };
+      if (!isInsideIsrael(from) || !isInsideIsrael(to)) {
+        return reply.status(400).send({ error: "Walk endpoints must be inside Israel bounds" });
+      }
+      const controller = new AbortController();
+      const onAborted = () => controller.abort();
+      request.raw.on("aborted", onAborted);
+      try {
+        const started = Date.now();
+        const result = await fetchWalkingRoute({ from, to, signal: controller.signal });
+        return WalkRouteResponseSchema.parse({
+          from,
+          to,
+          distanceMeters: result.distanceMeters,
+          durationSeconds: result.durationSeconds,
+          geometry: {
+            type: "LineString",
+            coordinates: result.coordinates,
+          },
+          meta: {
+            cached: result.cached,
+            approximated: result.approximated,
+            elapsedMs: Date.now() - started,
+            source: result.source,
+          },
+        });
+      } catch (error) {
+        if ((error as { name?: string }).name === "AbortError") {
+          return reply.status(400).send({ error: "Request cancelled" });
+        }
+        return sendCaughtError(request, reply, error, "walk route failed", query);
+      } finally {
+        request.raw.off("aborted", onAborted);
+      }
+    },
+  );
+
+  app.get(
+    "/v1/walk-amenities",
+    {
+      config: { rateLimit: RATE_LIMIT_SEARCH },
+      schema: {
+        querystring: z.object({
+          south: z.coerce.number(),
+          west: z.coerce.number(),
+          north: z.coerce.number(),
+          east: z.coerce.number(),
+        }),
+      },
+    },
+    async (request, reply) => {
+      const bbox = request.query as {
+        south: number;
+        west: number;
+        north: number;
+        east: number;
+      };
+      const invalid = validateWalkAmenityBbox(bbox);
+      if (invalid) {
+        return reply.status(400).send({ error: invalid });
+      }
+      const controller = new AbortController();
+      const onAborted = () => controller.abort();
+      request.raw.on("aborted", onAborted);
+      try {
+        const started = Date.now();
+        const result = await fetchWalkAmenities(bbox, controller.signal);
+        return WalkAmenitiesResponseSchema.parse({
+          amenities: result.amenities,
+          meta: {
+            cached: result.cached,
+            elapsedMs: Date.now() - started,
+            source: result.source,
+          },
+        });
+      } catch (error) {
+        if ((error as { name?: string }).name === "AbortError") {
+          return reply.status(400).send({ error: "Request cancelled" });
+        }
+        return sendCaughtError(request, reply, error, "walk amenities failed", bbox);
       } finally {
         request.raw.off("aborted", onAborted);
       }

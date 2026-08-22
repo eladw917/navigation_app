@@ -3,6 +3,7 @@ import {
   fetchBoardDepartures,
   fetchHealth,
   fetchTripPath,
+  fetchWalkAmenities,
   planDirect,
   reversePlace,
   type DirectPlanResponse,
@@ -12,6 +13,7 @@ import {
   type ScheduledDeparture,
   type StopDeparturesResponse,
   type TripPathResponse,
+  type WalkAmenity,
 } from "../api";
 import { FilterBar } from "../components/FilterBar";
 import { PlaceInput } from "../components/PlaceInput";
@@ -48,6 +50,12 @@ import {
   type PlanUrlRoute,
   type ParsedPlanUrl,
 } from "../urlState";
+import {
+  bboxesFromPlan,
+  filterPlanByWalkAmenity,
+  mergeWalkAmenities,
+  type WalkAmenityFilter,
+} from "../walkAmenities";
 
 type Endpoint = { label: string; location: LatLng } | null;
 
@@ -76,9 +84,7 @@ function readInitialShare(): ParsedPlanUrl | null {
 export function PlannerPage() {
   const initialShare = useMemo(() => readInitialShare(), []);
   const pendingRouteRef = useRef<PlanUrlRoute | null>(initialShare?.route ?? null);
-  const autoPlanFromUrlRef = useRef(
-    Boolean(initialShare?.origin && initialShare?.destination),
-  );
+  const dismissedPlanIdRef = useRef<string | null>(null);
 
   const [origin, setOrigin] = useState<Endpoint>(() => initialShare?.origin ?? null);
   const [destination, setDestination] = useState<Endpoint>(
@@ -96,6 +102,12 @@ export function PlannerPage() {
   /** Max walk+ride+walk journey time. */
   const [maxTotalTimeMinutes, setMaxTotalTimeMinutes] =
     useState<TotalTimeMaxMinutes>(90);
+  /** OSM amenity that must sit on the walk-to-stop / walk-from-stop path. */
+  const [walkAmenity, setWalkAmenity] = useState<WalkAmenityFilter>("any");
+  const [walkAmenities, setWalkAmenities] = useState<WalkAmenity[]>([]);
+  const [walkAmenityStatus, setWalkAmenityStatus] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
   const [plansByMode, setPlansByMode] = useState<Partial<Record<PlanMode, DirectPlanResponse>>>(
     {},
   );
@@ -170,6 +182,25 @@ export function PlannerPage() {
     ],
   );
 
+  const amenityPlan = useMemo(
+    () =>
+      filterPlanByWalkAmenity(
+        basePlan,
+        walkAmenityStatus === "ready" ? walkAmenities : [],
+        walkAmenityStatus === "ready" ? walkAmenity : "any",
+        origin?.location ?? null,
+        destination?.location ?? null,
+      ),
+    [
+      basePlan,
+      walkAmenities,
+      walkAmenity,
+      walkAmenityStatus,
+      origin?.location,
+      destination?.location,
+    ],
+  );
+
   const routeKeysSig = useMemo(
     () => (basePlan?.routes ?? []).map(routeOptionKey).join("|"),
     [basePlan?.routes],
@@ -181,16 +212,16 @@ export function PlannerPage() {
 
   /** Optional: after departures load, keep only options with a catchable departure soon. */
   const plan = useMemo(() => {
-    if (!basePlan) return null;
-    if (!limitSoonDepartures || !departuresReady) return basePlan;
+    if (!amenityPlan) return null;
+    if (!limitSoonDepartures || !departuresReady) return amenityPlan;
     return filterPlanByCatchableDepartures(
-      basePlan,
+      amenityPlan,
       departuresByKey,
       origin?.location ?? null,
       destination?.location ?? null,
     );
   }, [
-    basePlan,
+    amenityPlan,
     limitSoonDepartures,
     departuresReady,
     departuresByKey,
@@ -350,6 +381,43 @@ export function PlannerPage() {
     return () => controller.abort();
   }, [basePlan?.requestId, routeKeysSig, demoMode]);
 
+  useEffect(() => {
+    if (!fullPlan || demoMode) {
+      setWalkAmenities([]);
+      setWalkAmenityStatus("idle");
+      return;
+    }
+    const boxes = bboxesFromPlan(
+      fullPlan,
+      origin?.location ?? null,
+      destination?.location ?? null,
+    );
+    if (!boxes.length) {
+      setWalkAmenities([]);
+      setWalkAmenityStatus("error");
+      return;
+    }
+    const controller = new AbortController();
+    setWalkAmenityStatus("loading");
+    void Promise.all(boxes.map((box) => fetchWalkAmenities(box, controller.signal)))
+      .then((results) => {
+        if (controller.signal.aborted) return;
+        setWalkAmenities(mergeWalkAmenities(results.map((r) => r.amenities)));
+        setWalkAmenityStatus("ready");
+      })
+      .catch((err) => {
+        if ((err as Error).name === "AbortError") return;
+        console.error("[walk-amenities]", err);
+        if (!controller.signal.aborted) {
+          setWalkAmenities([]);
+          setWalkAmenityStatus("error");
+        }
+      });
+    return () => controller.abort();
+    // Isochrone identity is requestId; origin/dest are captured from that plan.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fullPlan?.requestId, demoMode]);
+
   /** Default the selected option to the next catchable trip so get-on clocks match "Next bus". */
   useEffect(() => {
     if (!selectedRoute || !selectedKey || !departuresReady) return;
@@ -423,16 +491,20 @@ export function PlannerPage() {
     userPickedDepartureRef.current = false;
     setActiveDeparture(null);
     setInstancePath(null);
-    if (!route) setScheduleExpanded(false);
+    if (!route) {
+      setScheduleExpanded(false);
+      dismissedPlanIdRef.current = plan?.requestId ?? fullPlan?.requestId ?? "dismissed";
+    }
     setSelectedRoute(route);
-    // Browse: keep options collapsed. Selected: open the line/station card.
-    setSheetExpanded(Boolean(route));
+    // Map card holds the itinerary; keep the sheet as a peek so they are not duplicated.
+    setSheetExpanded(false);
     if (!route) setMapLineActive(false);
   }
 
   function handleBrowseRoute(route: DirectRoute | null) {
     if (!route) {
       // Map cleared the line (empty map click / filter drop).
+      dismissedPlanIdRef.current = plan?.requestId ?? fullPlan?.requestId ?? "dismissed";
       setSelectedRoute(null);
       setScheduleExpanded(false);
       setActiveDeparture(null);
@@ -443,7 +515,6 @@ export function PlannerPage() {
     setSelectedRoute((prev) =>
       prev && routeOptionKey(prev) === routeOptionKey(route) ? prev : route,
     );
-    setSheetExpanded(true);
   }
 
   function handleSheetTouchStart(clientY: number) {
@@ -552,34 +623,20 @@ export function PlannerPage() {
   }
 
   useEffect(() => {
-    if (isDemoUrl()) {
-      loadDemo();
-      return;
-    }
-    if (autoPlanFromUrlRef.current && origin && destination) {
-      autoPlanFromUrlRef.current = false;
-      const distance = walkEstimateBetween(origin.location, destination.location).meters;
-      if (distance > MAX_PLAN_DISTANCE_METERS) {
-        setError("Shared points are more than 20 km apart");
-        return;
-      }
-      void runPlan(committedMinutes);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- hydrate once from share URL / demo
+    if (isDemoUrl()) loadDemo();
+    // Shared origin/destination only pre-fill the form — planning starts on Plan trip.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- hydrate demo once from the URL
   }, []);
 
-  /** After a shared-link plan lands, select the route encoded in m/r/b/a. */
+  /** After a plan lands, honor a shared ride encoded in m/r/b/a. */
   useEffect(() => {
+    if (loading || demoMode) return;
     const pending = pendingRouteRef.current;
-    if (!pending || loading || demoMode) return;
+    if (!pending) return;
     if (!Object.keys(plansByMode).length) return;
-    const routes = fullPlan?.routes ?? [];
-    const match = matchRouteFromUrl(routes, pending);
     pendingRouteRef.current = null;
-    if (match) {
-      setSelectedRoute(match);
-      setSheetExpanded(true);
-    }
+    const match = matchRouteFromUrl(fullPlan?.routes ?? [], pending);
+    if (match) setSelectedRoute(match);
   }, [plansByMode, fullPlan, loading, demoMode]);
 
   /** Keep the address bar in sync so the current trip is shareable. */
@@ -609,9 +666,16 @@ export function PlannerPage() {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
+    const timeout =
+      typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(30_000) : null;
+    const signal =
+      timeout && typeof AbortSignal.any === "function"
+        ? AbortSignal.any([controller.signal, timeout])
+        : controller.signal;
     setLoading(true);
     setError(null);
     setSelectedRoute(null);
+    dismissedPlanIdRef.current = null;
     console.info("[plan] start", {
       modes: ALL_MODES,
       maxWalkingSeconds: minutes * 60,
@@ -632,10 +696,10 @@ export function PlannerPage() {
       // Load both directions together so the first rendered map already contains
       // both walking areas and their pins.
       const [walkTransit, transitWalk] = await Promise.all([
-        planDirect({ ...shared, mode: "walk_transit" }, controller.signal),
-        planDirect({ ...shared, mode: "transit_walk" }, controller.signal),
+        planDirect({ ...shared, mode: "walk_transit" }, signal),
+        planDirect({ ...shared, mode: "transit_walk" }, signal),
       ]);
-      if (controller.signal.aborted) return;
+      if (abortRef.current !== controller) return;
       setCommittedMinutes(minutes);
       setSliderDraft(minutes);
       setPlansByMode({
@@ -660,17 +724,28 @@ export function PlannerPage() {
         },
       });
     } catch (err) {
-      if ((err as Error).name === "AbortError") return;
+      if (abortRef.current !== controller) return;
+      if ((err as Error).name === "AbortError") {
+        setError("Planning took too long. Try again.");
+        return;
+      }
       const message = err instanceof Error ? err.message : "Plan failed";
       console.error("[plan] failed", err);
       setError(message);
     } finally {
-      if (!controller.signal.aborted) setLoading(false);
+      if (abortRef.current === controller) setLoading(false);
     }
+  }
+
+  function cancelInFlightPlan() {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setLoading(false);
   }
 
   function selectOrigin(place: { label: string; location: LatLng }) {
     rememberPlace(place);
+    cancelInFlightPlan();
     setOrigin(place);
     setPlansByMode({});
     setSelectedRoute(null);
@@ -679,6 +754,7 @@ export function PlannerPage() {
 
   function selectDestination(place: { label: string; location: LatLng }) {
     rememberPlace(place);
+    cancelInFlightPlan();
     setDestination(place);
     setPlansByMode({});
     setSelectedRoute(null);
@@ -686,6 +762,7 @@ export function PlannerPage() {
   }
 
   function clearOrigin() {
+    cancelInFlightPlan();
     setOrigin(null);
     setPlansByMode({});
     setSelectedRoute(null);
@@ -693,6 +770,7 @@ export function PlannerPage() {
   }
 
   function clearDestination() {
+    cancelInFlightPlan();
     setDestination(null);
     setPlansByMode({});
     setSelectedRoute(null);
@@ -700,6 +778,7 @@ export function PlannerPage() {
   }
 
   function swapEndpoints() {
+    cancelInFlightPlan();
     setOrigin(destination);
     setDestination(origin);
     setPlansByMode({});
@@ -726,10 +805,14 @@ export function PlannerPage() {
     setLimitSoonDepartures(false);
     setMaxFrequencyMinutes("all");
     setMaxTotalTimeMinutes(90);
+    setWalkAmenity("any");
+    setWalkAmenities([]);
+    setWalkAmenityStatus("idle");
     setSchedule(DEFAULT_SCHEDULE);
     setSheetExpanded(false);
     setMapLineActive(false);
     userPickedDepartureRef.current = false;
+    dismissedPlanIdRef.current = null;
     setSliderDraft(committedMinutes);
   }
 
@@ -880,7 +963,7 @@ export function PlannerPage() {
               <button
                 type="button"
                 className="primary"
-                disabled={loading || !canPlan || tooFarToPlan}
+                disabled={!canPlan || tooFarToPlan}
                 onClick={() => {
                   void runPlan(sliderDraft);
                 }}
@@ -911,6 +994,9 @@ export function PlannerPage() {
               onFrequencyChange={setMaxFrequencyMinutes}
               maxTotalTimeMinutes={maxTotalTimeMinutes}
               onTotalTimeChange={setMaxTotalTimeMinutes}
+              walkAmenity={walkAmenity}
+              onWalkAmenityChange={setWalkAmenity}
+              walkAmenityDisabled={walkAmenityStatus !== "ready"}
               resultCount={isAdjusting ? (plan?.routes.length ?? 0) : null}
               disabled={!isAdjusting}
             />
@@ -926,8 +1012,14 @@ export function PlannerPage() {
           originLabel={origin?.label ?? null}
           destinationLabel={destination?.label ?? null}
           plan={isAdjusting ? plan : null}
+          walkAmenities={
+            isAdjusting && walkAmenity !== "any" && walkAmenityStatus === "ready"
+              ? walkAmenities.filter((a) => a.category === walkAmenity)
+              : []
+          }
+          walkAmenityCategory={walkAmenity}
           selectedRoute={isAdjusting ? mapSelectedRoute : null}
-          planning={loading && !isAdjusting}
+          planning={loading}
           overrideDeparture={activeDeparture}
           limitWalk={limitTotalWalk}
           maxWalkingSeconds={committedMinutes * 60}
@@ -992,6 +1084,10 @@ export function PlannerPage() {
                 instanceLoading={instanceLoading}
                 onBack={() => handleSelectRoute(null)}
                 showMode={showModeOnCards}
+                walkAmenities={
+                  walkAmenityStatus === "ready" ? walkAmenities : []
+                }
+                walkAmenityCategory={walkAmenity}
               />
             ) : isAdjusting ? (
               <RouteResults

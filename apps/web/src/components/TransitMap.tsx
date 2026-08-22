@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import maplibregl, { type GeoJSONSource, type Map as MapLibreMap, type MapLayerMouseEvent } from "maplibre-gl";
 import { formatHeadway, headwayToBucket, stationHeadwayFromLines } from "../frequency";
 import {
@@ -19,11 +19,53 @@ import {
   type TripPathResponse,
   type TripStop,
   type ValidStop,
+  type WalkAmenity,
 } from "../api";
+import {
+  amenitiesAlongCorridors,
+  amenityOnWalk,
+  amenityWalkLegs,
+  WALK_AMENITY_LABELS,
+  type WalkAmenityFilter,
+} from "../walkAmenities";
+import {
+  getWalkRoute,
+  peekWalkRoute,
+  straightLineWalk,
+  walkPairKey,
+  type WalkRouteResult,
+} from "../walkRoute";
+import { WalkAmenityList } from "./WalkAmenityList";
+
+const WALK_ROUTE_DEBOUNCE_MS = 80;
 
 const STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
 const EMPTY_LINE = { type: "FeatureCollection" as const, features: [] };
 const RTL_TEXT_PLUGIN_URL = `${import.meta.env.BASE_URL}mapbox-gl-rtl-text.js`;
+const BASEMAP_POI_LAYERS = ["poi_transit", "poi_r1", "poi_r7", "poi_r20"] as const;
+
+/** Liberty draws a bus-on-circle POI under our stop pins — hide it so drop-offs are not a red halo. */
+function hideBasemapBusPois(map: MapLibreMap) {
+  const notBus: maplibregl.FilterSpecification = [
+    "match",
+    ["get", "class"],
+    ["bus"],
+    false,
+    true,
+  ];
+  for (const id of BASEMAP_POI_LAYERS) {
+    if (!map.getLayer(id)) continue;
+    if (id === "poi_transit") {
+      map.setFilter(id, ["==", ["get", "class"], "airport"]);
+      continue;
+    }
+    const existing = map.getFilter(id);
+    map.setFilter(
+      id,
+      existing ? (["all", existing, notBus] as maplibregl.FilterSpecification) : notBus,
+    );
+  }
+}
 
 /** Hebrew/Arabic basemap labels need the RTL shaping plugin. */
 function ensureRtlTextPlugin() {
@@ -61,63 +103,178 @@ function appendCoordinatePoints(value: unknown, points: LatLng[]): void {
 }
 
 /** Avoid MapLibre world-zoom when padding exceeds the map container size. */
-const STATION_POPUP_BOTTOM_PAD = 280;
+function clampFramePadding(
+  w: number,
+  h: number,
+  requested: { top: number; bottom: number; left: number; right: number },
+  minPad: number,
+  keepBottom = false,
+) {
+  const minInnerH = keepBottom
+    ? Math.max(80, Math.floor(h * 0.18))
+    : Math.max(180, Math.floor(h * 0.42));
+  const minInnerW = Math.max(160, Math.floor(w * 0.5));
+  let top = requested.top;
+  let bottom = requested.bottom;
+  let left = requested.left;
+  let right = requested.right;
+
+  const shrinkVertical = () => {
+    const inner = h - top - bottom;
+    if (inner >= minInnerH) return;
+    const need = minInnerH - inner;
+    const cutTop = Math.min(need, Math.max(0, top - minPad));
+    top -= cutTop;
+    const still = need - cutTop;
+    if (still > 0 && !keepBottom) bottom = Math.max(minPad, bottom - still);
+  };
+  const shrinkHorizontal = () => {
+    const inner = w - left - right;
+    if (inner >= minInnerW) return;
+    const need = minInnerW - inner;
+    const cut = Math.ceil(need / 2);
+    left = Math.max(minPad, left - cut);
+    right = Math.max(minPad, right - cut);
+  };
+
+  shrinkVertical();
+  shrinkHorizontal();
+
+  if (keepBottom) {
+    const maxBottom = Math.max(minPad, h - top - minInnerH);
+    bottom = Math.min(bottom, maxBottom);
+  } else {
+    const extraH = Math.floor((h - top - bottom - minInnerH) / 2);
+    if (extraH >= 20) {
+      const inset = Math.min(48, extraH);
+      top += inset;
+      bottom += inset;
+    }
+  }
+
+  return { top, bottom, left, right };
+}
+
+function cameraForPaddedBounds(
+  map: MapLibreMap,
+  bounds: maplibregl.LngLatBounds,
+  padding: { top: number; bottom: number; left: number; right: number },
+  maxZoom: number,
+) {
+  return map.cameraForBounds(bounds, { padding, maxZoom });
+}
 
 function safeFitBounds(
   map: MapLibreMap,
   points: LatLng[],
   opts?: {
     maxZoom?: number;
+    minZoom?: number;
     duration?: number;
     minPad?: number;
+    keepBottom?: boolean;
     padding?: { top?: number; bottom?: number; left?: number; right?: number };
   },
 ) {
   const valid = points.filter(isValidLngLat);
   if (!valid.length) return;
 
-  map.resize();
-  const w = map.getContainer().clientWidth;
-  const h = map.getContainer().clientHeight;
+  const el = map.getContainer();
+  const w = el.clientWidth;
+  const h = el.clientHeight;
+  const sizeKey = `${w}x${h}`;
+  const sized = map as MapLibreMap & { __fitSize?: string };
+  if (sized.__fitSize !== sizeKey) {
+    sized.__fitSize = sizeKey;
+    map.resize();
+  }
   if (w < 40 || h < 40) return;
 
   const maxZoom = opts?.maxZoom ?? 15;
+  const minZoom = opts?.minZoom ?? 12;
   const duration = opts?.duration ?? 450;
   const minPad = opts?.minPad ?? 24;
   const edge = Math.max(minPad, Math.min(72, Math.floor(Math.min(w, h) * 0.1)));
-  const padding = {
-    top: opts?.padding?.top ?? edge,
-    bottom: opts?.padding?.bottom ?? edge,
-    left: opts?.padding?.left ?? edge,
-    right: opts?.padding?.right ?? edge,
-  };
-
-  if (valid.length === 1) {
-    const p = valid[0]!;
-    map.easeTo({
-      center: [p.lng, p.lat],
-      zoom: Math.min(14, maxZoom),
-      duration,
-      padding,
-    });
-    return;
-  }
+  const padding = clampFramePadding(
+    w,
+    h,
+    {
+      top: opts?.padding?.top ?? edge,
+      bottom: opts?.padding?.bottom ?? edge,
+      left: opts?.padding?.left ?? edge,
+      right: opts?.padding?.right ?? edge,
+    },
+    minPad,
+    opts?.keepBottom === true,
+  );
 
   const bounds = new maplibregl.LngLatBounds();
   for (const p of valid) bounds.extend([p.lng, p.lat]);
   if (bounds.isEmpty()) return;
 
-  map.fitBounds(bounds, {
-    padding,
-    maxZoom,
+  const cam = cameraForPaddedBounds(map, bounds, padding, maxZoom);
+  if (!cam?.center) return;
+  const zoom = Math.max(minZoom, Math.min(maxZoom, cam.zoom ?? maxZoom));
+
+  map.stop();
+  map.easeTo({
+    center: cam.center,
+    zoom,
+    bearing: cam.bearing,
     duration,
+    essential: true,
   });
 }
 
-function fitPaddingForPopup(reservePopup: boolean) {
-  // Extra top/side room so O/D label chips stay clear of the frame and station popup.
-  if (!reservePopup) return { top: 56, bottom: 48, left: 56, right: 56 };
-  return { top: 88, bottom: STATION_POPUP_BOTTOM_PAD, left: 56, right: 56 };
+type MapFocus = "board" | "alight";
+
+const MAP_EDGE_PAD = { top: 56, bottom: 56, left: 44, right: 44 };
+const FIT_INSET = { top: 20, bottom: 20, left: 20, right: 20 };
+
+function popupCoverPx(map: MapLibreMap, popup: HTMLElement | null): number {
+  if (!popup) return 0;
+  const mapBox = map.getContainer().getBoundingClientRect();
+  const cardBox = popup.getBoundingClientRect();
+  return Math.max(0, Math.round(mapBox.bottom - cardBox.top));
+}
+
+function cameraPaddingForCard(
+  map: MapLibreMap,
+  popup: HTMLElement | null,
+  reservePopup: boolean,
+  extraTop = 0,
+) {
+  const h = map.getContainer().clientHeight;
+  const top = MAP_EDGE_PAD.top + extraTop;
+  if (!reservePopup) {
+    return { top, bottom: MAP_EDGE_PAD.bottom, left: MAP_EDGE_PAD.left, right: MAP_EDGE_PAD.right };
+  }
+  const cover = popupCoverPx(map, popup) + 16;
+  const minInner = 80;
+  const bottom = Math.min(cover, Math.max(MAP_EDGE_PAD.bottom, h - top - minInner));
+  return { top, bottom, left: MAP_EDGE_PAD.left, right: MAP_EDGE_PAD.right };
+}
+
+function fitPaddingForPopup(
+  popupHeight: number | null,
+  reservePopup: boolean,
+  extraTop = 0,
+) {
+  const top = MAP_EDGE_PAD.top + extraTop;
+  if (!reservePopup) {
+    return { top, bottom: MAP_EDGE_PAD.bottom, left: MAP_EDGE_PAD.left, right: MAP_EDGE_PAD.right };
+  }
+  const card = (popupHeight && popupHeight > 0 ? popupHeight : 280) + 68;
+  return { top, bottom: card, left: MAP_EDGE_PAD.left, right: MAP_EDGE_PAD.right };
+}
+
+function walkingCluster(
+  stations: Array<{ lng: number; lat: number; inWalkingArea?: boolean }>,
+  fallback: LatLng[] = [],
+): LatLng[] {
+  const inArea = stations.filter((s) => s.inWalkingArea === true && isValidLngLat(s));
+  if (inArea.length) return inArea.map((s) => ({ lng: s.lng, lat: s.lat }));
+  return fallback.filter(isValidLngLat);
 }
 
 function truncateMapLabel(text: string, max = 28): string {
@@ -188,6 +345,10 @@ type Props = {
   onLineActiveChange?: (active: boolean) => void;
   /** Fired when map browse resolves to a plan route (or clears). */
   onBrowseRouteChange?: (route: DirectRoute | null) => void;
+  /** OSM places of the selected On-the-walk type (unfiltered by station). */
+  walkAmenities?: WalkAmenity[];
+  /** Selected amenity type; map/popup list only that category on the station walk. */
+  walkAmenityCategory?: WalkAmenityFilter;
 };
 
 type Station = ValidStop & { distanceMeters: number };
@@ -239,9 +400,10 @@ function haversineMeters(a: LatLng, b: LatLng): number {
 /** Matches API circular walking fallback (~1.25 m/s). Straight-line estimate. */
 const WALK_SPEED_MPS = 1.25;
 
-function formatWalkLeg(meters: number): string {
+function formatWalkLeg(meters: number, seconds?: number): string {
   const m = Math.max(0, Math.round(meters));
-  const minutes = Math.max(1, Math.round(meters / WALK_SPEED_MPS / 60));
+  const duration = seconds ?? meters / WALK_SPEED_MPS;
+  const minutes = Math.max(1, Math.round(duration / 60));
   if (m < 1000) return `${m} m · ~${minutes} min`;
   return `${(m / 1000).toFixed(1)} km · ~${minutes} min`;
 }
@@ -315,6 +477,55 @@ function routeMatchesBus(route: DirectRoute, bus: string): boolean {
   return true;
 }
 
+/** Plan get-on / get-off options for this line — not every stop on the GTFS trip. */
+function plannedStationsAlongTrip(
+  lineStations: LineStation[],
+  plan: DirectPlanResponse,
+  bus: string,
+  end: "board" | "alight",
+  chosenId: string | null,
+  otherEndId: string | null,
+  stopMeta: Map<string, ValidStop>,
+  origin: LatLng | null,
+): LineStation[] {
+  const ids = new Set<string>();
+  if (chosenId) ids.add(chosenId);
+  for (const route of plan.routes) {
+    if (routeBusName(route) !== bus) continue;
+    ids.add(end === "board" ? route.boardStopId : route.alightStopId);
+  }
+  const otherIdx = otherEndId
+    ? lineStations.findIndex((s) => s.stopId === otherEndId)
+    : -1;
+  const ordered: LineStation[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < lineStations.length; i++) {
+    const station = lineStations[i]!;
+    if (!ids.has(station.stopId) || seen.has(station.stopId)) continue;
+    if (end === "alight" && otherIdx >= 0 && i <= otherIdx && station.stopId !== chosenId) {
+      continue;
+    }
+    if (end === "board" && otherIdx >= 0 && i >= otherIdx && station.stopId !== chosenId) {
+      continue;
+    }
+    ordered.push(station);
+    seen.add(station.stopId);
+  }
+  for (const id of ids) {
+    if (seen.has(id)) continue;
+    const fromLine = lineStations.find((s) => s.stopId === id);
+    const fromMeta = stopMeta.get(id);
+    const extra = fromLine ?? (fromMeta ? validStopToLineStation(fromMeta, origin) : null);
+    if (!extra) continue;
+    if (end === "board") ordered.unshift(extra);
+    else ordered.push(extra);
+    seen.add(id);
+  }
+  if (ordered.length) return ordered;
+  const chosen = chosenId ? lineStations.find((s) => s.stopId === chosenId) : null;
+  return chosen ? [chosen] : [];
+}
+
 function routeChipLabel(busKey: string): string {
   const idx = busKey.indexOf(":");
   if (idx < 0) return busKey;
@@ -349,7 +560,7 @@ function buildMapPins(
   routes: DirectRoute[],
   stopMeta: Map<string, ValidStop>,
   origin: LatLng | null,
-  destination: LatLng | null,
+  _destination: LatLng | null,
   selectedBus: string | null,
   currentStation: LineStation | null,
 ): Array<{
@@ -423,55 +634,20 @@ function buildMapPins(
   }
 
   for (const [bus, busRoutes] of byBus) {
-    let bestBoard: DirectRoute | null = null;
-    let bestBoardDist = Number.POSITIVE_INFINITY;
-    let bestAlight: DirectRoute | null = null;
-    let bestAlightDist = Number.POSITIVE_INFINITY;
-
     for (const route of busRoutes) {
-      if (origin && isValidLngLat(origin)) {
-        const d = haversineMeters(origin, {
-          lng: route.boardLng,
-          lat: route.boardLat,
-        });
-        if (d < bestBoardDist) {
-          bestBoardDist = d;
-          bestBoard = route;
-        }
-      } else if (!bestBoard) {
-        bestBoard = route;
-      }
-
-      if (destination && isValidLngLat(destination)) {
-        const d = haversineMeters(destination, {
-          lng: route.alightLng,
-          lat: route.alightLat,
-        });
-        if (d < bestAlightDist) {
-          bestAlightDist = d;
-          bestAlight = route;
-        }
-      } else if (!bestAlight) {
-        bestAlight = route;
-      }
-    }
-
-    if (bestBoard) {
       addBus(
-        bestBoard.boardStopId,
-        bestBoard.boardStopName,
-        bestBoard.boardLng,
-        bestBoard.boardLat,
+        route.boardStopId,
+        route.boardStopName,
+        route.boardLng,
+        route.boardLat,
         bus,
         "board",
       );
-    }
-    if (bestAlight) {
       addBus(
-        bestAlight.alightStopId,
-        bestAlight.alightStopName,
-        bestAlight.alightLng,
-        bestAlight.alightLat,
+        route.alightStopId,
+        route.alightStopName,
+        route.alightLng,
+        route.alightLat,
         bus,
         "alight",
       );
@@ -506,6 +682,42 @@ function buildMapPins(
   }
 
   return [...byStop.values()];
+}
+
+/** Lines on the same map pin as this stop (shared best board/alight). */
+function busesAtStopPin(
+  routes: DirectRoute[],
+  stopMeta: Map<string, ValidStop>,
+  origin: LatLng | null,
+  destination: LatLng | null,
+  stopId: string,
+  fallbackBus: string,
+): string[] {
+  const pin = buildMapPins(routes, stopMeta, origin, destination, null, null).find(
+    (entry) => entry.stop.stopId === stopId,
+  );
+  const fromPin = pin ? [...new Set([...pin.boardBuses, ...pin.alightBuses])] : [];
+  const buses = fromPin.includes(fallbackBus) ? fromPin : [fallbackBus, ...fromPin];
+  return [...new Set(buses)].sort((a, b) =>
+    a.localeCompare(b, undefined, { numeric: true }),
+  );
+}
+
+function sortBusesByFrequency(
+  buses: string[],
+  plan: DirectPlanResponse,
+  currentStation: LineStation | null,
+  stopMeta: Map<string, ValidStop>,
+  preferredStopId: string | null,
+): string[] {
+  return [...new Set(buses)].sort((a, b) => {
+    const ha = headwayForBus(plan, a, currentStation, stopMeta, preferredStopId);
+    const hb = headwayForBus(plan, b, currentStation, stopMeta, preferredStopId);
+    const va = ha != null && ha > 0 ? ha : Number.POSITIVE_INFINITY;
+    const vb = hb != null && hb > 0 ? hb : Number.POSITIVE_INFINITY;
+    if (va !== vb) return va - vb;
+    return a.localeCompare(b, undefined, { numeric: true });
+  });
 }
 
 function pinFreqBucket(
@@ -603,12 +815,56 @@ function nearestCoordIndex(
   return bestIdx;
 }
 
+function journeyFitPoints(
+  origin: LatLng | null,
+  destination: LatLng | null,
+  tripPath: TripPathResponse,
+  board: { lng: number; lat: number } | null,
+  alight: { lng: number; lat: number } | null,
+  walks?: {
+    toBoard?: [number, number][] | null;
+    fromAlight?: [number, number][] | null;
+  },
+): LatLng[] {
+  const points: LatLng[] = [];
+  const push = (lng: number, lat: number) => {
+    if (Number.isFinite(lng) && Number.isFinite(lat)) points.push({ lng, lat });
+  };
+  if (origin && isValidLngLat(origin)) points.push(origin);
+  if (destination && isValidLngLat(destination)) points.push(destination);
+  if (board) push(board.lng, board.lat);
+  if (alight) push(alight.lng, alight.lat);
+
+  const allCoords =
+    tripPath.geometry.coordinates.length >= 2
+      ? (tripPath.geometry.coordinates as [number, number][])
+      : tripPath.stops.map((s) => [s.lng, s.lat] as [number, number]);
+  if (board && alight && allCoords.length >= 2) {
+    const startIdx = nearestCoordIndex(allCoords, board);
+    let endIdx = nearestCoordIndex(allCoords, alight);
+    if (endIdx < startIdx) endIdx = allCoords.length - 1;
+    for (const coord of allCoords.slice(startIdx, endIdx + 1)) {
+      push(coord[0]!, coord[1]!);
+    }
+  }
+
+  for (const line of [walks?.toBoard, walks?.fromAlight]) {
+    if (!line) continue;
+    for (const coord of line) push(coord[0]!, coord[1]!);
+  }
+  return points;
+}
+
 function buildJourneyGeoJson(
   origin: LatLng | null,
   destination: LatLng | null,
   tripPath: TripPathResponse,
   boardOverride: { lng: number; lat: number; stopId?: string } | null = null,
   alightOverride: { lng: number; lat: number; stopId?: string } | null = null,
+  routedWalks?: {
+    toBoard?: [number, number][] | null;
+    fromAlight?: [number, number][] | null;
+  },
 ): { type: "FeatureCollection"; features: object[] } {
   const board =
     boardOverride ??
@@ -624,34 +880,38 @@ function buildJourneyGeoJson(
     kind: "walk" | "walkAfter",
     from: { lng: number; lat: number },
     to: { lng: number; lat: number },
+    routed?: [number, number][] | null,
   ) => {
+    const coordinates =
+      routed && routed.length >= 2
+        ? routed
+        : ([
+            [from.lng, from.lat],
+            [to.lng, to.lat],
+          ] as [number, number][]);
     features.push({
       type: "Feature",
       properties: { kind },
       geometry: {
         type: "LineString",
-        coordinates: [
-          [from.lng, from.lat],
-          [to.lng, to.lat],
-        ],
+        coordinates,
       },
     });
-    // Solid caps so dashed walk lines visually meet O/D pins and stop circles.
+    // Cap only at O/D — a cap on the stop sits on the station circle as a second ring.
     const endKind = kind === "walk" ? "walkEnd" : "walkAfterEnd";
-    for (const point of [from, to]) {
-      features.push({
-        type: "Feature",
-        properties: { kind: endKind },
-        geometry: {
-          type: "Point",
-          coordinates: [point.lng, point.lat],
-        },
-      });
-    }
+    const cap = kind === "walk" ? from : to;
+    features.push({
+      type: "Feature",
+      properties: { kind: endKind },
+      geometry: {
+        type: "Point",
+        coordinates: [cap.lng, cap.lat],
+      },
+    });
   };
 
   if (origin && board) {
-    pushWalkLeg("walk", origin, { lng: board.lng, lat: board.lat });
+    pushWalkLeg("walk", origin, { lng: board.lng, lat: board.lat }, routedWalks?.toBoard);
   }
 
   // Prefer full trip stop coordinates so pre-board / post-alight picks still work.
@@ -674,8 +934,6 @@ function buildJourneyGeoJson(
     let endIdx = alight ? nearestCoordIndex(allCoords, alight) : allCoords.length - 1;
     if (endIdx < startIdx) endIdx = allCoords.length - 1;
 
-    // Outside the selected ride: full line stays visible, but muted grey.
-    pushLine("transitOutside", allCoords.slice(0, startIdx + 1));
     let rideCoords = allCoords.slice(startIdx, endIdx + 1);
     if (rideCoords.length < 2) {
       rideCoords = [
@@ -684,13 +942,17 @@ function buildJourneyGeoJson(
       ];
     }
     pushLine("transit", rideCoords);
-    pushLine("transitOutside", allCoords.slice(endIdx));
   } else {
     pushLine("transit", allCoords);
   }
 
   if (destination && alight) {
-    pushWalkLeg("walkAfter", { lng: alight.lng, lat: alight.lat }, destination);
+    pushWalkLeg(
+      "walkAfter",
+      { lng: alight.lng, lat: alight.lat },
+      destination,
+      routedWalks?.fromAlight,
+    );
   }
 
   return { type: "FeatureCollection", features };
@@ -837,6 +1099,108 @@ function headwayForBus(
   return route?.headwaySeconds ?? null;
 }
 
+/** Distinct from station pins: stops are circles (drop-off = red). Amenities are squares. */
+const AMENITY_MARKER: Record<
+  WalkAmenity["category"],
+  { fill: string; stroke: string }
+> = {
+  cafe: { fill: "#f59e0b", stroke: "#78350f" },
+  grocery: { fill: "#059669", stroke: "#064e3b" },
+  bakery: { fill: "#fb923c", stroke: "#9a3412" },
+  pharmacy: { fill: "#14b8a6", stroke: "#115e59" },
+  atm: { fill: "#64748b", stroke: "#1e293b" },
+  park: { fill: "#84cc16", stroke: "#3f6212" },
+};
+
+function roundRectPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number,
+) {
+  const radius = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.arcTo(x + w, y, x + w, y + h, radius);
+  ctx.arcTo(x + w, y + h, x, y + h, radius);
+  ctx.arcTo(x, y + h, x, y, radius);
+  ctx.arcTo(x, y, x + w, y, radius);
+  ctx.closePath();
+}
+
+function addAmenityMarkerImages(map: MapLibreMap) {
+  const size = 64;
+  for (const [category, colors] of Object.entries(AMENITY_MARKER)) {
+    const id = `amenity-${category}`;
+    if (map.hasImage(id)) continue;
+    const canvas = document.createElement("canvas");
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) continue;
+    roundRectPath(ctx, 6, 6, size - 12, size - 12, 12);
+    ctx.fillStyle = colors.fill;
+    ctx.fill();
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = colors.stroke;
+    ctx.stroke();
+    map.addImage(id, ctx.getImageData(0, 0, size, size), { pixelRatio: 2 });
+  }
+}
+
+function amenitiesToGeoJson(
+  amenities: WalkAmenity[],
+  ctx?: {
+    origin?: LatLng | null;
+    destination?: LatLng | null;
+    route?: DirectRoute | null;
+  },
+) {
+  return {
+    type: "FeatureCollection" as const,
+    features: amenities.map((amenity) => {
+      let walkNote = "On the walking path";
+      if (ctx?.origin && ctx?.destination && ctx?.route) {
+        const legs = amenityWalkLegs(amenity, ctx.origin, ctx.destination, ctx.route);
+        walkNote =
+          legs.toBoard && legs.fromAlight
+            ? "On both walks"
+            : legs.toBoard
+              ? "On the walk to the stop"
+              : legs.fromAlight
+                ? "On the walk after the ride"
+                : "On the walking path";
+      }
+      const metersFromOrigin = ctx?.origin
+        ? Math.round(haversineMeters(ctx.origin, { lng: amenity.lng, lat: amenity.lat }))
+        : 0;
+      const metersFromDest = ctx?.destination
+        ? Math.round(haversineMeters(ctx.destination, { lng: amenity.lng, lat: amenity.lat }))
+        : 0;
+      const meters =
+        walkNote === "On the walk after the ride" && metersFromDest > 0
+          ? metersFromDest
+          : metersFromOrigin;
+      return {
+        type: "Feature" as const,
+        properties: {
+          id: amenity.id,
+          name: amenity.name,
+          category: amenity.category,
+          walkNote,
+          meters,
+        },
+        geometry: {
+          type: "Point" as const,
+          coordinates: [amenity.lng, amenity.lat] as [number, number],
+        },
+      };
+    }),
+  };
+}
+
 export function TransitMap({
   origin,
   destination,
@@ -848,16 +1212,19 @@ export function TransitMap({
   onSelectStop,
   overrideDeparture = null,
   onOpenSchedule,
-  maxWalkingSeconds = null,
-  limitWalk = false,
+  maxWalkingSeconds: _maxWalkingSeconds = null,
+  limitWalk: _limitWalk = false,
   onLineActiveChange,
   onBrowseRouteChange,
+  walkAmenities = [],
+  walkAmenityCategory = "any",
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const originMarkerRef = useRef<maplibregl.Marker | null>(null);
   const destinationMarkerRef = useRef<maplibregl.Marker | null>(null);
   const walkLabelMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const amenityPopupRef = useRef<maplibregl.Popup | null>(null);
   const browseRef = useRef<BrowseState | null>(null);
   const onSelectStopRef = useRef(onSelectStop);
   const onLineActiveChangeRef = useRef(onLineActiveChange);
@@ -886,8 +1253,18 @@ export function TransitMap({
   const [tripPath, setTripPath] = useState<TripPathResponse | null>(null);
   const [pathLoading, setPathLoading] = useState(false);
   const [pathError, setPathError] = useState<string | null>(null);
+  const [walkByKey, setWalkByKey] = useState<Record<string, WalkRouteResult>>({});
+  const walkByKeyRef = useRef(walkByKey);
+  walkByKeyRef.current = walkByKey;
   const [popupDepartures, setPopupDepartures] = useState<StopDeparturesResponse | null>(null);
   const [popupDeparturesLoading, setPopupDeparturesLoading] = useState(false);
+  const [overviewFocus, setOverviewFocus] = useState<MapFocus>("board");
+  const [popupHeight, setPopupHeight] = useState(0);
+  const popupRef = useRef<HTMLDivElement | null>(null);
+  const boardFrameRef = useRef<LatLng[]>([]);
+  const alightFrameRef = useRef<LatLng[]>([]);
+  const overviewFocusRef = useRef<MapFocus>("board");
+  const frameWalkWithAmenityRef = useRef<(point: LatLng) => void>(() => undefined);
   const fittedPlanId = useRef<string | null>(null);
   const fittedPathKey = useRef<string | null>(null);
 
@@ -942,100 +1319,59 @@ export function TransitMap({
   const chosenAlightId = browse?.chosenAlightId ?? recommendedAlightId;
 
   /**
-   * Get on: trip start → one stop before get-off (never includes get-off).
-   * When walk limit is on, only stops within the remaining walk budget from origin.
+   * Stepper lists are the plan's get-on / get-off options for this line, not the
+   * full GTFS trip (terminus, earlier feeders, etc.).
    */
   const boardScrollStations = useMemo((): LineStation[] => {
-    if (!lineStations.length) return [];
-    const alightIdx = chosenAlightId
-      ? lineStations.findIndex((s) => s.stopId === chosenAlightId)
-      : -1;
-    let list =
-      alightIdx > 0
-        ? lineStations.slice(0, alightIdx)
-        : alightIdx === 0
-          ? lineStations.slice(0, 1)
-          : lineStations;
-    if (limitWalk && maxWalkingSeconds != null && origin && isValidLngLat(origin)) {
-      const alightWalk =
-        chosenAlightId && destination && isValidLngLat(destination)
-          ? (() => {
-              const a = lineStations.find((s) => s.stopId === chosenAlightId);
-              return a
-                ? haversineMeters({ lng: a.lng, lat: a.lat }, destination) / WALK_SPEED_MPS
-                : 0;
-            })()
-          : 0;
-      const budget = Math.max(0, maxWalkingSeconds - alightWalk);
-      list = list.filter(
-        (s) => haversineMeters(origin, { lng: s.lng, lat: s.lat }) / WALK_SPEED_MPS <= budget + 0.5,
-      );
-    }
-    return list;
-  }, [
-    lineStations,
-    chosenAlightId,
-    limitWalk,
-    maxWalkingSeconds,
-    origin,
-    destination,
-  ]);
+    if (!browse?.bus || !plan) return [];
+    return plannedStationsAlongTrip(
+      lineStations,
+      plan,
+      browse.bus,
+      "board",
+      chosenBoardId,
+      chosenAlightId,
+      stopMeta,
+      origin,
+    );
+  }, [browse?.bus, plan, lineStations, chosenBoardId, chosenAlightId, stopMeta, origin]);
 
-  /**
-   * Get off: one stop after get-on → trip end (never includes get-on).
-   * When walk limit is on, only stops within the remaining walk budget to destination.
-   */
   const alightScrollStations = useMemo((): LineStation[] => {
-    if (!lineStations.length) return [];
-    const boardIdx = chosenBoardId
-      ? lineStations.findIndex((s) => s.stopId === chosenBoardId)
-      : -1;
-    let list =
-      boardIdx >= 0 && boardIdx < lineStations.length - 1
-        ? lineStations.slice(boardIdx + 1)
-        : boardIdx === lineStations.length - 1
-          ? lineStations.slice(boardIdx)
-          : lineStations;
-    if (limitWalk && maxWalkingSeconds != null && destination && isValidLngLat(destination)) {
-      const boardWalk =
-        chosenBoardId && origin && isValidLngLat(origin)
-          ? (() => {
-              const b = lineStations.find((s) => s.stopId === chosenBoardId);
-              return b
-                ? haversineMeters(origin, { lng: b.lng, lat: b.lat }) / WALK_SPEED_MPS
-                : 0;
-            })()
-          : 0;
-      const budget = Math.max(0, maxWalkingSeconds - boardWalk);
-      list = list.filter(
-        (s) =>
-          haversineMeters({ lng: s.lng, lat: s.lat }, destination) / WALK_SPEED_MPS <=
-          budget + 0.5,
-      );
-    }
-    return list;
-  }, [
-    lineStations,
-    chosenBoardId,
-    limitWalk,
-    maxWalkingSeconds,
-    origin,
-    destination,
-  ]);
+    if (!browse?.bus || !plan) return [];
+    return plannedStationsAlongTrip(
+      lineStations,
+      plan,
+      browse.bus,
+      "alight",
+      chosenAlightId,
+      chosenBoardId,
+      stopMeta,
+      origin,
+    );
+  }, [browse?.bus, plan, lineStations, chosenAlightId, chosenBoardId, stopMeta, origin]);
 
   const scrollStations = useMemo((): LineStation[] => {
     if (!browse?.bus) return [];
     return browse.scrollEnd === "alight" ? alightScrollStations : boardScrollStations;
   }, [browse?.bus, browse?.scrollEnd, boardScrollStations, alightScrollStations]);
 
-  // If the scroll list shrinks, keep browse.index in range.
+  // Keep the stepper on the chosen stop when the option list changes.
   useEffect(() => {
     if (!browse?.bus || !scrollStations.length) return;
+    const preferred = browse.preferredStopId
+      ? scrollStations.findIndex((s) => s.stopId === browse.preferredStopId)
+      : -1;
+    if (preferred >= 0) {
+      if (preferred !== browse.index) {
+        setBrowse((prev) => (prev ? { ...prev, index: preferred } : prev));
+      }
+      return;
+    }
     if (browse.index < scrollStations.length) return;
     const next = scrollStations.length - 1;
     setBrowse((prev) => (prev ? { ...prev, index: next } : prev));
     onSelectStopRef.current?.(scrollStations[next]?.stopId ?? null);
-  }, [browse?.bus, browse?.index, browse?.scrollEnd, scrollStations]);
+  }, [browse?.bus, browse?.index, browse?.preferredStopId, browse?.scrollEnd, scrollStations]);
 
   const focusStop = useMemo((): LineStation | null => {
     if (!browse?.preferredStopId || !plan) return null;
@@ -1070,6 +1406,22 @@ export function TransitMap({
     }
     return map;
   }, [browse, plan, currentStation, stopMeta]);
+
+  const orderedBuses = useMemo(() => {
+    if (!browse?.buses.length) return [];
+    if (!plan) {
+      return [...browse.buses].sort((a, b) =>
+        a.localeCompare(b, undefined, { numeric: true }),
+      );
+    }
+    return sortBusesByFrequency(
+      browse.buses,
+      plan,
+      currentStation,
+      stopMeta,
+      browse.preferredStopId,
+    );
+  }, [browse?.buses, browse?.preferredStopId, plan, currentStation, stopMeta]);
 
   const boardStop = useMemo(() => {
     if (!browse?.bus) return null;
@@ -1143,30 +1495,100 @@ export function TransitMap({
     return alightStop;
   }, [chosenAlightId, lineStations, browse?.scrollEnd, currentStation, alightStop]);
 
+  const stationWalkAmenities = useMemo(() => {
+    if (walkAmenityCategory === "any" || !walkAmenities.length) return [];
+    if (!browse?.bus && !selectedRoute) return [];
+    const originOk = isValidLngLat(origin);
+    const destOk = isValidLngLat(destination);
+    if (!originOk || !destOk) return [];
+    const boardPt = effectiveBoard
+      ? { lng: effectiveBoard.lng, lat: effectiveBoard.lat }
+      : selectedRoute
+        ? { lng: selectedRoute.boardLng, lat: selectedRoute.boardLat }
+        : null;
+    const alightPt = effectiveAlight
+      ? { lng: effectiveAlight.lng, lat: effectiveAlight.lat }
+      : selectedRoute
+        ? { lng: selectedRoute.alightLng, lat: selectedRoute.alightLat }
+        : null;
+    const corridors: { from: LatLng; to: LatLng }[] = [];
+    if (boardPt) corridors.push({ from: origin, to: boardPt });
+    if (alightPt) corridors.push({ from: alightPt, to: destination });
+    if (!corridors.length) return [];
+    return amenitiesAlongCorridors(walkAmenities, corridors);
+  }, [
+    walkAmenityCategory,
+    walkAmenities,
+    origin,
+    destination,
+    browse?.bus,
+    selectedRoute,
+    effectiveBoard,
+    effectiveAlight,
+  ]);
+
+  overviewFocusRef.current = overviewFocus;
+
+  boardFrameRef.current = [
+    ...(isValidLngLat(origin) ? [origin] : []),
+    ...walkingCluster(
+      boardScrollStations,
+      effectiveBoard ? [{ lng: effectiveBoard.lng, lat: effectiveBoard.lat }] : [],
+    ),
+    ...(effectiveBoard
+      ? [{ lng: effectiveBoard.lng, lat: effectiveBoard.lat }]
+      : []),
+    ...(!browse?.bus && plan
+      ? plan.validStops
+          .filter((s) => s.role !== "alighting")
+          .map((s) => ({ lng: s.lng, lat: s.lat }))
+      : []),
+  ];
+  alightFrameRef.current = [
+    ...(isValidLngLat(destination) ? [destination] : []),
+    ...walkingCluster(
+      alightScrollStations,
+      effectiveAlight ? [{ lng: effectiveAlight.lng, lat: effectiveAlight.lat }] : [],
+    ),
+    ...(effectiveAlight
+      ? [{ lng: effectiveAlight.lng, lat: effectiveAlight.lat }]
+      : []),
+    ...(!browse?.bus && plan
+      ? plan.validStops
+          .filter((s) => s.role !== "boarding")
+          .map((s) => ({ lng: s.lng, lat: s.lat }))
+      : []),
+  ];
+
   const linePositionLabel = useMemo(() => {
-    if (!currentStation || !lineStations.length) return null;
-    const idx = lineStations.findIndex((s) => s.stopId === currentStation.stopId);
+    if (!currentStation || !scrollStations.length) return null;
+    const idx = scrollStations.findIndex((s) => s.stopId === currentStation.stopId);
     if (idx < 0) return null;
-    return `Stop ${idx + 1}/${lineStations.length}`;
-  }, [currentStation, lineStations]);
+    return `${idx + 1} of ${scrollStations.length}`;
+  }, [currentStation, scrollStations]);
 
   const walkSummary = useMemo(() => {
     if (!browse?.bus || !tripPath || !effectiveBoard || !effectiveAlight) return null;
 
-    const walkToBoard =
-      origin && isValidLngLat(origin)
-        ? haversineMeters(origin, {
-            lng: effectiveBoard.lng,
-            lat: effectiveBoard.lat,
-          })
-        : null;
-    const walkFromAlight =
+    const boardPt = { lng: effectiveBoard.lng, lat: effectiveBoard.lat };
+    const alightPt = { lng: effectiveAlight.lng, lat: effectiveAlight.lat };
+    const toBoardRoute =
+      origin && isValidLngLat(origin) ? walkByKey[walkPairKey(origin, boardPt)] : null;
+    const fromAlightRoute =
       destination && isValidLngLat(destination)
-        ? haversineMeters(
-            { lng: effectiveAlight.lng, lat: effectiveAlight.lat },
-            destination,
-          )
+        ? walkByKey[walkPairKey(alightPt, destination)]
         : null;
+
+    const walkToBoard =
+      toBoardRoute?.distanceMeters ??
+      (origin && isValidLngLat(origin) ? haversineMeters(origin, boardPt) : null);
+    const walkFromAlight =
+      fromAlightRoute?.distanceMeters ??
+      (destination && isValidLngLat(destination)
+        ? haversineMeters(alightPt, destination)
+        : null);
+    const walkToBoardSeconds = toBoardRoute?.durationSeconds;
+    const walkFromAlightSeconds = fromAlightRoute?.durationSeconds;
 
     let rideSeconds: number | null = tripPath.rideDurationSeconds ?? null;
     let stopsRemaining: number | null = null;
@@ -1198,14 +1620,24 @@ export function TransitMap({
 
     const rideLabel = formatRideLeg(rideSeconds, stopsRemaining);
     if (walkToBoard == null && walkFromAlight == null && !rideLabel) return null;
-    return { walkToBoard, walkFromAlight, rideLabel };
-  }, [browse?.bus, origin, destination, effectiveBoard, effectiveAlight, tripPath]);
+    return {
+      walkToBoard,
+      walkFromAlight,
+      walkToBoardSeconds,
+      walkFromAlightSeconds,
+      rideLabel,
+    };
+  }, [browse?.bus, origin, destination, effectiveBoard, effectiveAlight, tripPath, walkByKey]);
 
   /**
    * Seconds to reach get-on, matching the Walk-to-stop row (rounded minutes),
    * plus the assumption that walking starts 1 minute from now (applied in pick).
    */
   const walkSecondsToBoard = useMemo(() => {
+    const seconds = walkSummary?.walkToBoardSeconds;
+    if (seconds != null && Number.isFinite(seconds) && seconds >= 0) {
+      return Math.max(1, Math.round(seconds / 60)) * 60;
+    }
     const meters =
       walkSummary?.walkToBoard ??
       (origin && isValidLngLat(origin) && effectiveBoard
@@ -1217,7 +1649,100 @@ export function TransitMap({
     if (meters == null || !Number.isFinite(meters) || meters < 0) return 0;
     const minutes = Math.max(1, Math.round(meters / WALK_SPEED_MPS / 60));
     return minutes * 60;
-  }, [walkSummary?.walkToBoard, origin, effectiveBoard]);
+  }, [walkSummary?.walkToBoard, walkSummary?.walkToBoardSeconds, origin, effectiveBoard]);
+
+  useEffect(() => {
+    if (!browse?.bus) return;
+    if (!isValidLngLat(origin) || !isValidLngLat(destination)) return;
+
+    const boardPt = effectiveBoard
+      ? { lng: effectiveBoard.lng, lat: effectiveBoard.lat }
+      : null;
+    const alightPt = effectiveAlight
+      ? { lng: effectiveAlight.lng, lat: effectiveAlight.lat }
+      : null;
+
+    const boardSuggested =
+      Boolean(boardPt) && effectiveBoard?.stopId === recommendedBoardId;
+    const alightSuggested =
+      Boolean(alightPt) && effectiveAlight?.stopId === recommendedAlightId;
+
+    const missing: { from: LatLng; to: LatLng }[] = [];
+    const hydrated: Record<string, WalkRouteResult> = {};
+    const straight: Record<string, WalkRouteResult> = {};
+
+    const takeStraight = (from: LatLng, to: LatLng) => {
+      const key = walkPairKey(from, to);
+      if (walkByKeyRef.current[key]) return;
+      straight[key] = straightLineWalk(from, to);
+    };
+    const takeOrs = (from: LatLng, to: LatLng) => {
+      const key = walkPairKey(from, to);
+      if (walkByKeyRef.current[key]) return;
+      const peeked = peekWalkRoute(from, to);
+      if (peeked) hydrated[key] = peeked;
+      else missing.push({ from, to });
+    };
+
+    if (boardPt) {
+      if (boardSuggested) takeOrs(origin, boardPt);
+      else takeStraight(origin, boardPt);
+    }
+    if (alightPt) {
+      if (alightSuggested) takeOrs(alightPt, destination);
+      else takeStraight(alightPt, destination);
+    }
+
+    if (Object.keys(hydrated).length || Object.keys(straight).length) {
+      setWalkByKey((prev) => ({ ...prev, ...straight, ...hydrated }));
+    }
+    if (!missing.length) return;
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      void Promise.all(
+        missing.map(async (leg) => {
+          const result = await getWalkRoute(leg.from, leg.to, controller.signal);
+          return [walkPairKey(leg.from, leg.to), result] as const;
+        }),
+      )
+        .then((entries) => {
+          if (controller.signal.aborted) return;
+          setWalkByKey((prev) => {
+            const next = { ...prev };
+            for (const [key, result] of entries) next[key] = result;
+            return next;
+          });
+        })
+        .catch((err) => {
+          if ((err as Error).name === "AbortError") return;
+          console.warn("[walk-route]", err);
+          if (controller.signal.aborted) return;
+          setWalkByKey((prev) => {
+            const next = { ...prev };
+            for (const leg of missing) {
+              const key = walkPairKey(leg.from, leg.to);
+              if (!next[key]) next[key] = straightLineWalk(leg.from, leg.to);
+            }
+            return next;
+          });
+        });
+    }, WALK_ROUTE_DEBOUNCE_MS);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [
+    browse?.bus,
+    recommendedBoardId,
+    recommendedAlightId,
+    currentStation,
+    effectiveBoard,
+    effectiveAlight,
+    origin,
+    destination,
+  ]);
 
   const browseMatchesSelectedRoute = useMemo(() => {
     if (!browse?.bus || !selectedRoute || !effectiveBoard || !effectiveAlight) return false;
@@ -1349,6 +1874,54 @@ export function TransitMap({
   ]);
 
   const stationCount = scrollStations.length;
+  const showStationPopup = Boolean(browse && currentStation && !planning);
+  const lineSelected = Boolean(browse?.bus);
+  const amenityRoute = useMemo((): DirectRoute | null => {
+    if (selectedRoute) {
+      const boardStation = chosenBoardId
+        ? lineStations.find((s) => s.stopId === chosenBoardId)
+        : null;
+      const alightStation = chosenAlightId
+        ? lineStations.find((s) => s.stopId === chosenAlightId)
+        : null;
+      return {
+        ...selectedRoute,
+        boardStopId: boardStation?.stopId ?? selectedRoute.boardStopId,
+        boardStopName: boardStation?.name ?? selectedRoute.boardStopName,
+        boardLng: boardStation?.lng ?? selectedRoute.boardLng,
+        boardLat: boardStation?.lat ?? selectedRoute.boardLat,
+        alightStopId: alightStation?.stopId ?? selectedRoute.alightStopId,
+        alightStopName: alightStation?.name ?? selectedRoute.alightStopName,
+        alightLng: alightStation?.lng ?? selectedRoute.alightLng,
+        alightLat: alightStation?.lat ?? selectedRoute.alightLat,
+      };
+    }
+    return null;
+  }, [selectedRoute, lineStations, chosenBoardId, chosenAlightId]);
+
+  useEffect(() => {
+    setOverviewFocus("board");
+    fittedPlanId.current = null;
+    fittedPathKey.current = null;
+  }, [plan?.requestId]);
+
+  useLayoutEffect(() => {
+    const el = popupRef.current;
+    if (!el) {
+      setPopupHeight(0);
+      return;
+    }
+    const update = () => setPopupHeight(el.offsetHeight);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [showStationPopup, lineSelected, browse?.scrollEnd, tripPath, stationWalkAmenities.length]);
+
+  useEffect(() => {
+    amenityPopupRef.current?.remove();
+    amenityPopupRef.current = null;
+  }, [currentStation?.stopId]);
 
   function clearLineSelection() {
     pathAbortRef.current?.abort();
@@ -1370,36 +1943,9 @@ export function TransitMap({
     onBrowseRouteChangeRef.current?.(null);
   }
 
-  function focusScrollEnd(end: ScrollEnd) {
-    if (!browse?.bus) return;
-    const list = end === "alight" ? alightScrollStations : boardScrollStations;
-    // Keep the already-chosen station for this end; only jump to recommended if none yet.
-    const keepId =
-      end === "alight"
-        ? (browse.chosenAlightId ?? recommendedAlightId)
-        : (browse.chosenBoardId ?? recommendedBoardId);
-    if (!list.length) {
-      setBrowse({
-        ...browse,
-        scrollEnd: end,
-        index: 0,
-        chosenBoardId: browse.chosenBoardId ?? recommendedBoardId,
-        chosenAlightId: browse.chosenAlightId ?? recommendedAlightId,
-      });
-      return;
-    }
-    let index = keepId != null ? list.findIndex((s) => s.stopId === keepId) : -1;
-    if (index < 0) index = 0;
-    const stop = list[index]!;
-    setBrowse({
-      ...browse,
-      scrollEnd: end,
-      index,
-      preferredStopId: stop.stopId,
-      chosenBoardId: browse.chosenBoardId ?? recommendedBoardId,
-      chosenAlightId: browse.chosenAlightId ?? recommendedAlightId,
-    });
-    onSelectStopRef.current?.(stop.stopId);
+  function setOverviewCluster(focus: MapFocus) {
+    fittedPlanId.current = null;
+    setOverviewFocus(focus);
   }
 
   async function loadTripPathForBus(
@@ -1569,7 +2115,6 @@ export function TransitMap({
         chosenAlightId: focusAlightId,
       });
       onSelectStopRef.current?.(focusStopId);
-      fittedPathKey.current = null;
     } catch (err) {
       if ((err as Error).name === "AbortError") return;
 
@@ -1596,11 +2141,15 @@ export function TransitMap({
 
   openBrowseRef.current = (stopId: string, buses: string[]) => {
     if (!buses.length) return;
-    const merged = [...new Set(buses)].sort((a, b) =>
-      a.localeCompare(b, undefined, { numeric: true }),
-    );
-    // Load the first line immediately so the board→get-off route appears.
-    void loadTripPathForBus(merged[0]!, stopId, merged);
+    const station = stopMeta.get(stopId)
+      ? validStopToLineStation(stopMeta.get(stopId)!, origin)
+      : currentStation;
+    const sorted = plan
+      ? sortBusesByFrequency(buses, plan, station, stopMeta, stopId)
+      : [...new Set(buses)].sort((a, b) =>
+          a.localeCompare(b, undefined, { numeric: true }),
+        );
+    void loadTripPathForBus(sorted[0]!, stopId, sorted);
   };
 
   selectLineStopRef.current = (stopId: string) => {
@@ -1644,8 +2193,24 @@ export function TransitMap({
     if (openedFromCardRef.current === selectedRouteKey) return;
     openedFromCardRef.current = selectedRouteKey;
     const bus = routeBusName(selectedRoute);
-    // Open map path focused on the boarding station for this option.
-    void loadTripPathForBus(bus, selectedRoute.boardStopId, [bus], selectedRoute);
+    const buses = sortBusesByFrequency(
+      busesAtStopPin(
+        plan.routes,
+        stopMeta,
+        origin,
+        destination,
+        selectedRoute.boardStopId,
+        bus,
+      ),
+      plan,
+      stopMeta.get(selectedRoute.boardStopId)
+        ? validStopToLineStation(stopMeta.get(selectedRoute.boardStopId)!, origin)
+        : null,
+      stopMeta,
+      selectedRoute.boardStopId,
+    );
+    // Open the list pick as a full ride on the map.
+    void loadTripPathForBus(bus, selectedRoute.boardStopId, buses, selectedRoute);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- loadTripPathForBus closes over latest plan/endpoints
   }, [selectedRouteKey, plan, selectedRoute]);
 
@@ -1782,8 +2347,9 @@ export function TransitMap({
       if (!live) return;
       safeFitBounds(live, points, {
         maxZoom: 15,
+        minZoom: 13,
         duration: 450,
-        padding: fitPaddingForPopup(false),
+        padding: fitPaddingForPopup(null, false),
       });
     });
   });
@@ -1801,6 +2367,7 @@ export function TransitMap({
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
 
     map.on("load", () => {
+      hideBasemapBusPois(map);
       map.addSource("isochrone", {
         type: "geojson",
         data: { type: "FeatureCollection", features: [] },
@@ -1918,12 +2485,46 @@ export function TransitMap({
         type: "geojson",
         data: { type: "FeatureCollection", features: [] },
       });
+      map.addSource("walk-amenities", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+      addAmenityMarkerImages(map);
+      map.addLayer({
+        id: "walk-amenities-icon",
+        type: "symbol",
+        source: "walk-amenities",
+        layout: {
+          "icon-image": [
+            "match",
+            ["get", "category"],
+            "cafe",
+            "amenity-cafe",
+            "grocery",
+            "amenity-grocery",
+            "bakery",
+            "amenity-bakery",
+            "pharmacy",
+            "amenity-pharmacy",
+            "atm",
+            "amenity-atm",
+            "park",
+            "amenity-park",
+            "amenity-cafe",
+          ],
+          "icon-size": 0.5,
+          "icon-allow-overlap": true,
+          "icon-ignore-placement": true,
+          "icon-anchor": "center",
+        },
+      });
       map.addLayer({
         id: "stops-circle",
         type: "circle",
         source: "stops",
         paint: {
-          // Line stops (incl. selected) stay fixed size — selection uses stroke only.
+          // Line stops stay fixed size. Drop-off option pins are uniform;
+          // boarding / both scale with frequency. Selection uses stroke only.
           "circle-radius": [
             "case",
             ["==", ["get", "dim"], true],
@@ -2006,6 +2607,7 @@ export function TransitMap({
       if (map.getLayer("route-line-walk-after-ends")) {
         map.moveLayer("route-line-walk-after-ends");
       }
+      if (map.getLayer("walk-amenities-icon")) map.moveLayer("walk-amenities-icon");
       map.moveLayer("stops-circle");
 
       map.on("mouseenter", "stops-circle", () => {
@@ -2013,6 +2615,54 @@ export function TransitMap({
       });
       map.on("mouseleave", "stops-circle", () => {
         map.getCanvas().style.cursor = "";
+      });
+
+      map.on("mouseenter", "walk-amenities-icon", () => {
+        map.getCanvas().style.cursor = "pointer";
+      });
+      map.on("mouseleave", "walk-amenities-icon", () => {
+        map.getCanvas().style.cursor = "";
+      });
+
+      map.on("click", "walk-amenities-icon", (e: MapLayerMouseEvent) => {
+        e.originalEvent.stopPropagation();
+        suppressMapClickRef.current = true;
+        const feature = e.features?.[0];
+        if (!feature || feature.geometry.type !== "Point") return;
+        const coords = feature.geometry.coordinates as [number, number];
+        const props = feature.properties ?? {};
+        const name = String(props.name ?? "");
+        const category = String(props.category ?? "") as keyof typeof WALK_AMENITY_LABELS;
+        const kind = WALK_AMENITY_LABELS[category] ?? "Place";
+        const walkNote = String(props.walkNote ?? "On the walking path");
+        const meters = Number(props.meters ?? 0);
+        amenityPopupRef.current?.remove();
+        const body = document.createElement("div");
+        body.className = "amenity-popup";
+        const title = document.createElement("strong");
+        title.textContent = name || kind;
+        const meta = document.createElement("span");
+        meta.textContent = name ? kind : "Place";
+        const where = document.createElement("span");
+        where.textContent = walkNote;
+        body.append(title, meta, where);
+        if (Number.isFinite(meters) && meters > 0) {
+          const dist = document.createElement("span");
+          const fromDest = walkNote.includes("after");
+          dist.textContent = fromDest
+            ? `${meters} m from destination`
+            : `${meters} m from start`;
+          body.append(dist);
+        }
+        amenityPopupRef.current = new maplibregl.Popup({
+          closeButton: true,
+          offset: 12,
+          className: "amenity-popup-tip",
+        })
+          .setLngLat(coords)
+          .setDOMContent(body)
+          .addTo(map);
+        frameWalkWithAmenityRef.current({ lng: coords[0], lat: coords[1] });
       });
 
       map.on("click", "stops-circle", (e: MapLayerMouseEvent) => {
@@ -2052,7 +2702,11 @@ export function TransitMap({
             suppressMapClickRef.current = false;
             return;
           }
-          const hits = map.queryRenderedFeatures(e.point, { layers: ["stops-circle"] });
+          const hits = map.queryRenderedFeatures(e.point, {
+            layers: ["stops-circle", "walk-amenities-icon"].filter((id) =>
+              Boolean(map.getLayer(id)),
+            ),
+          });
           if (!hits.length) clearLineSelection();
         }, 0);
       });
@@ -2065,8 +2719,12 @@ export function TransitMap({
     return () => {
       originMarkerRef.current?.remove();
       destinationMarkerRef.current?.remove();
+      walkLabelMarkerRef.current?.remove();
+      amenityPopupRef.current?.remove();
       originMarkerRef.current = null;
       destinationMarkerRef.current = null;
+      walkLabelMarkerRef.current = null;
+      amenityPopupRef.current = null;
       map.remove();
       mapRef.current = null;
     };
@@ -2077,6 +2735,11 @@ export function TransitMap({
     clearLineSelection();
     fittedPlanId.current = null;
   }, [plan?.requestId]);
+
+  useEffect(() => {
+    if (!planning) return;
+    clearLineSelection();
+  }, [planning]);
 
   // Filters keep requestId stable — drop the open line if it was filtered out.
   useEffect(() => {
@@ -2092,8 +2755,12 @@ export function TransitMap({
     const clearPlanLayers = () => {
       const iso = map.getSource("isochrone") as GeoJSONSource | undefined;
       const stops = map.getSource("stops") as GeoJSONSource | undefined;
+      const amenities = map.getSource("walk-amenities") as GeoJSONSource | undefined;
       iso?.setData({ type: "FeatureCollection", features: [] });
       stops?.setData({ type: "FeatureCollection", features: [] });
+      amenities?.setData({ type: "FeatureCollection", features: [] });
+      amenityPopupRef.current?.remove();
+      amenityPopupRef.current = null;
       // Keep / draw the pre-plan walking path between selected endpoints.
       syncWalkPreview.current(true);
       whenMapReady.current(() => syncEndpointMarkers.current());
@@ -2113,7 +2780,8 @@ export function TransitMap({
     if (!map) return;
     whenMapReady.current(() => {
       syncEndpointMarkers.current();
-      if (!plan) syncWalkPreview.current(true);
+      if (plan) return;
+      syncWalkPreview.current(true);
       focusEndpoints.current();
     });
   }, [origin, destination, originLabel, destinationLabel, plan]);
@@ -2130,16 +2798,49 @@ export function TransitMap({
 
       iso.setData(plan.isochrone as never);
 
+      const boardPt = effectiveBoard
+        ? { lng: effectiveBoard.lng, lat: effectiveBoard.lat }
+        : currentStation && browse?.scrollEnd !== "alight"
+          ? { lng: currentStation.lng, lat: currentStation.lat }
+          : null;
+      const alightPt = effectiveAlight
+        ? { lng: effectiveAlight.lng, lat: effectiveAlight.lat }
+        : currentStation && browse?.scrollEnd === "alight"
+          ? { lng: currentStation.lng, lat: currentStation.lat }
+          : null;
+      const boardSuggested =
+        Boolean(boardPt) && effectiveBoard?.stopId === recommendedBoardId;
+      const alightSuggested =
+        Boolean(alightPt) && effectiveAlight?.stopId === recommendedAlightId;
+      const toBoardWalk =
+        origin && boardPt ? walkByKey[walkPairKey(origin, boardPt)] : null;
+      const fromAlightWalk =
+        destination && alightPt ? walkByKey[walkPairKey(alightPt, destination)] : null;
+      const toBoardRouted =
+        boardSuggested && toBoardWalk && !toBoardWalk.approximated
+          ? toBoardWalk.coordinates
+          : null;
+      const fromAlightRouted =
+        alightSuggested && fromAlightWalk && !fromAlightWalk.approximated
+          ? fromAlightWalk.coordinates
+          : null;
+      const suggestedWalksPending =
+        Boolean(browse?.bus) &&
+        ((boardSuggested && origin && boardPt && !toBoardWalk) ||
+          (alightSuggested && destination && alightPt && !fromAlightWalk));
+
       if (browse?.bus && tripPath) {
         routeLine.setData(
-          buildJourneyGeoJson(origin, destination, tripPath, effectiveBoard, effectiveAlight) as never,
+          buildJourneyGeoJson(origin, destination, tripPath, effectiveBoard, effectiveAlight, {
+            toBoard: toBoardRouted,
+            fromAlight: fromAlightRouted,
+          }) as never,
         );
       } else if (browse?.bus && pathError) {
         routeLine.setData(EMPTY_LINE);
       } else if (browse?.bus) {
         // Line is opening — keep whatever is on the map rather than reverting to the O/D walk.
       } else if (isValidLngLat(origin) && isValidLngLat(destination)) {
-        // Browse after resolve: show direct walking path between endpoints.
         routeLine.setData(buildOdWalkGeoJson(origin, destination) as never);
       } else {
         routeLine.setData(EMPTY_LINE);
@@ -2152,30 +2853,13 @@ export function TransitMap({
       }> = [];
 
       if (browse?.bus && tripPath) {
-        // Line selected: only this trip's stops. Active get-on/get-off drive pin roles.
+        // Ride stops only (board → alight). Not the rest of the GTFS trip.
         const activeBoardId = effectiveBoard?.stopId ?? null;
         const activeAlightId = effectiveAlight?.stopId ?? null;
-        const boardSeq =
-          tripPath.stops.find((s) => s.stopId === activeBoardId)?.stopSequence ??
-          tripPath.stops.find((s) => s.isBoard)?.stopSequence ??
-          null;
-        const alightSeq =
-          tripPath.stops.find((s) => s.stopId === activeAlightId)?.stopSequence ??
-          tripPath.stops.find((s) => s.isAlight)?.stopSequence ??
-          null;
         for (const stop of tripPath.stops) {
           const isActiveBoard = activeBoardId != null && stop.stopId === activeBoardId;
           const isActiveAlight = activeAlightId != null && stop.stopId === activeAlightId;
-          const beforeBoard =
-            boardSeq != null &&
-            stop.stopSequence < boardSeq &&
-            !isActiveBoard;
-          const afterAlight =
-            alightSeq != null &&
-            stop.stopSequence > alightSeq &&
-            !isActiveAlight;
-          const outsideSelectedRide =
-            (beforeBoard || afterAlight) && !isActiveBoard && !isActiveAlight;
+          if (!stop.onPath && !isActiveBoard && !isActiveAlight) continue;
           const role = isActiveAlight
             ? "alighting"
             : isActiveBoard
@@ -2190,7 +2874,7 @@ export function TransitMap({
               name: stop.name,
               role,
               selected: Boolean(isActiveBoard || isActiveAlight),
-              dim: outsideSelectedRide,
+              dim: false,
               lineStop: true,
               endpoint: isActiveAlight ? "alight" : isActiveBoard ? "board" : "",
               outside: !walkingStopIds.has(stop.stopId),
@@ -2236,11 +2920,7 @@ export function TransitMap({
               stopId: s.stopId,
               name: s.name,
               role,
-              selected: Boolean(
-                selectedRoute &&
-                  (selectedRoute.boardStopId === s.stopId ||
-                    selectedRoute.alightStopId === s.stopId),
-              ),
+              selected: false,
               dim: false,
               lineStop: false,
               endpoint: role === "alighting" ? "alight" : "",
@@ -2254,63 +2934,107 @@ export function TransitMap({
             },
           });
         }
+        // Boarding on top so a nearby drop-off cannot draw a red ring around a bus pin.
+        const roleOrder: Record<string, number> = { alighting: 0, both: 1, boarding: 2 };
+        features.sort(
+          (a, b) =>
+            (roleOrder[String(a.properties.role)] ?? 1) -
+            (roleOrder[String(b.properties.role)] ?? 1),
+        );
       }
 
       stops.setData({ type: "FeatureCollection", features });
+      const amenitySource = map.getSource("walk-amenities") as GeoJSONSource | undefined;
+      amenitySource?.setData(
+        amenitiesToGeoJson(stationWalkAmenities, {
+          origin,
+          destination,
+          route: amenityRoute,
+        }) as never,
+      );
+      if (!stationWalkAmenities.length) {
+        amenityPopupRef.current?.remove();
+        amenityPopupRef.current = null;
+      }
+      if (map.getLayer("walk-amenities-icon")) map.moveLayer("walk-amenities-icon");
       if (map.getLayer("stops-circle")) map.moveLayer("stops-circle");
 
-      if (browse?.bus && tripPath) {
-        // Fit once per board/alight pair — swapping to the next-departure tripId must not re-zoom.
-        const pathKey = `${browse.bus}:${effectiveBoard?.stopId ?? tripPath.boardStopId}:${effectiveAlight?.stopId ?? tripPath.alightStopId}`;
+      const extraTop = browse?.bus ? 0 : 48;
+      const waitingForCard = showStationPopup && popupCoverPx(map, popupRef.current) < 48;
+      if (browse?.bus && (!tripPath || suggestedWalksPending || waitingForCard)) {
+        syncEndpointMarkers.current();
+        return;
+      }
+      if (!browse?.bus && waitingForCard) {
+        syncEndpointMarkers.current();
+        return;
+      }
+      const camPad = cameraPaddingForCard(
+        map,
+        popupRef.current,
+        showStationPopup,
+        extraTop,
+      );
+
+      if (browse?.bus) {
+        if (!tripPath) {
+          syncEndpointMarkers.current();
+          return;
+        }
+        const onSuggested =
+          effectiveBoard?.stopId === recommendedBoardId &&
+          effectiveAlight?.stopId === recommendedAlightId;
+        if (!onSuggested) {
+          syncEndpointMarkers.current();
+          return;
+        }
+        const pathKey = `${browse.bus}:line:${effectiveBoard?.stopId ?? tripPath.boardStopId}:${effectiveAlight?.stopId ?? tripPath.alightStopId}:${toBoardRouted?.length ?? 0}:${fromAlightRouted?.length ?? 0}`;
         if (fittedPathKey.current !== pathKey) {
           fittedPathKey.current = pathKey;
-          const points: LatLng[] = [];
-          for (const coord of tripPath.geometry.coordinates) {
-            const lng = coord[0];
-            const lat = coord[1];
-            if (Number.isFinite(lng) && Number.isFinite(lat)) {
-              points.push({ lng, lat });
-            }
-          }
-          const board = tripPath.stops.find((s) => s.isBoard);
-          const alight =
-            tripPath.stops.find((s) => s.isAlight) ??
-            tripPath.stops.find((s) => s.stopId === tripPath.alightStopId);
-          if (board) points.push({ lng: board.lng, lat: board.lat });
-          if (alight) points.push({ lng: alight.lng, lat: alight.lat });
-          // Frame the ride segment so board + alight stay visible (walk O/D may lie outside).
+          const points = journeyFitPoints(
+            origin,
+            destination,
+            tripPath,
+            effectiveBoard,
+            effectiveAlight,
+            { toBoard: toBoardRouted, fromAlight: fromAlightRouted },
+          );
           safeFitBounds(map, points, {
             maxZoom: 14,
-            duration: 500,
-            padding: fitPaddingForPopup(Boolean(!selectedRoute)),
-          });
-        } else if (currentStation && !selectedRoute) {
-          const points: LatLng[] = [];
-          if (isValidLngLat(origin)) points.push(origin);
-          if (isValidLngLat(destination)) points.push(destination);
-          points.push({ lng: currentStation.lng, lat: currentStation.lat });
-          safeFitBounds(map, points, {
-            maxZoom: 14,
-            duration: 350,
-            padding: fitPaddingForPopup(true),
+            minZoom: 11,
+            duration: 550,
+            keepBottom: showStationPopup,
+            padding: camPad,
           });
         }
+        syncEndpointMarkers.current();
         return;
       }
 
-      // While the line path is loading, keep the current view (don't zoom into the stop).
-      if (browse && pathLoading) return;
-
-      if (fittedPlanId.current !== plan.requestId) {
-        fittedPlanId.current = plan.requestId;
-        // Browse state: zoom out only enough to keep origin + destination in view.
+      const overviewKey = `${plan.requestId}:${overviewFocus}`;
+      if (fittedPlanId.current !== overviewKey) {
+        fittedPlanId.current = overviewKey;
         const points: LatLng[] = [];
-        if (isValidLngLat(origin)) points.push(origin);
-        if (isValidLngLat(destination)) points.push(destination);
+        if (overviewFocus === "alight") {
+          if (isValidLngLat(destination)) points.push(destination);
+        } else if (isValidLngLat(origin)) {
+          points.push(origin);
+        }
+        for (const feature of features) {
+          const role = String(feature.properties.role ?? "");
+          const include =
+            overviewFocus === "alight" ? role !== "boarding" : role !== "alighting";
+          if (!include) continue;
+          const [lng, lat] = feature.geometry.coordinates;
+          if (Number.isFinite(lng) && Number.isFinite(lat)) {
+            points.push({ lng, lat });
+          }
+        }
         safeFitBounds(map, points, {
           maxZoom: 15,
+          minZoom: 13,
           duration: 600,
-          padding: { top: 72, bottom: 96, left: 56, right: 56 },
+          padding: camPad,
         });
       }
 
@@ -2332,13 +3056,31 @@ export function TransitMap({
     pathLoading,
     pathError,
     walkingStopIds,
+    showStationPopup,
+    stationWalkAmenities,
+    overviewFocus,
+    popupHeight,
+    amenityRoute,
+    boardScrollStations,
+    alightScrollStations,
+    walkByKey,
+    recommendedBoardId,
+    recommendedAlightId,
   ]);
 
   function selectBus(bus: string) {
     if (!browse || bus === browse.bus) return;
     const preferred =
       currentStation?.stopId ?? browse.preferredStopId ?? null;
-    const buses = [...new Set([...browse.buses, bus])];
+    const buses = plan
+      ? sortBusesByFrequency(
+          [...browse.buses, bus],
+          plan,
+          currentStation,
+          stopMeta,
+          preferred,
+        )
+      : [...new Set([...browse.buses, bus])];
     void loadTripPathForBus(bus, preferred, buses);
   }
 
@@ -2377,9 +3119,98 @@ export function TransitMap({
     onSelectStopRef.current?.(station.stopId);
   }
 
+  function frameWholeJourney() {
+    const map = mapRef.current;
+    if (!map || !tripPath) return;
+    fittedPathKey.current = null;
+    const boardPt = effectiveBoard
+      ? { lng: effectiveBoard.lng, lat: effectiveBoard.lat }
+      : null;
+    const alightPt = effectiveAlight
+      ? { lng: effectiveAlight.lng, lat: effectiveAlight.lat }
+      : null;
+    const boardSuggested =
+      Boolean(boardPt) && effectiveBoard?.stopId === recommendedBoardId;
+    const alightSuggested =
+      Boolean(alightPt) && effectiveAlight?.stopId === recommendedAlightId;
+    const toBoardWalk =
+      origin && boardPt ? walkByKey[walkPairKey(origin, boardPt)] : null;
+    const fromAlightWalk =
+      destination && alightPt ? walkByKey[walkPairKey(alightPt, destination)] : null;
+    const points = journeyFitPoints(origin, destination, tripPath, boardPt, alightPt, {
+      toBoard:
+        boardSuggested && toBoardWalk && !toBoardWalk.approximated
+          ? toBoardWalk.coordinates
+          : null,
+      fromAlight:
+        alightSuggested && fromAlightWalk && !fromAlightWalk.approximated
+          ? fromAlightWalk.coordinates
+          : null,
+    });
+    safeFitBounds(map, points, {
+      maxZoom: 14,
+      minZoom: 11,
+      duration: 550,
+      padding: FIT_INSET,
+    });
+  }
+
+  function frameWalkWithAmenity(point: LatLng) {
+    const map = mapRef.current;
+    if (!map) return;
+    const board = effectiveBoard
+      ? { lng: effectiveBoard.lng, lat: effectiveBoard.lat }
+      : null;
+    const alight = effectiveAlight
+      ? { lng: effectiveAlight.lng, lat: effectiveAlight.lat }
+      : null;
+    const dummy = { id: "", name: "", category: "cafe" as const, ...point };
+    const onAfter =
+      alight && destination && amenityOnWalk(dummy, alight, destination);
+    const onToBoard =
+      board && origin && amenityOnWalk(dummy, origin, board);
+    const cluster: LatLng[] = [point];
+    if (onAfter && !onToBoard) {
+      if (alight) cluster.push(alight);
+      if (destination) cluster.push(destination);
+    } else {
+      if (origin) cluster.push(origin);
+      if (board) cluster.push(board);
+    }
+    safeFitBounds(map, cluster, {
+      maxZoom: 16,
+      minZoom: 14,
+      duration: 450,
+      padding: FIT_INSET,
+    });
+  }
+  frameWalkWithAmenityRef.current = frameWalkWithAmenity;
+
   return (
     <div className="map-wrap">
       <div ref={containerRef} className="map-canvas" aria-label="Transit map" />
+      {plan && !planning && !browse?.bus ? (
+        <div
+          className="map-focus-toggle map-focus-toggle--overview"
+          role="group"
+          aria-label="Zoom to boarding or alighting stops"
+        >
+          <button
+            type="button"
+            className={overviewFocus === "board" ? "active" : ""}
+            onClick={() => setOverviewCluster("board")}
+          >
+            Get on
+          </button>
+          <button
+            type="button"
+            className={overviewFocus === "alight" ? "active" : ""}
+            onClick={() => setOverviewCluster("alight")}
+          >
+            Get off
+          </button>
+        </div>
+      ) : null}
       {planning ? (
         <div className="map-status" role="status" aria-live="polite">
           <span className="spinner" aria-hidden />
@@ -2397,11 +3228,16 @@ export function TransitMap({
           {pathError}
         </div>
       ) : null}
-      {browse && currentStation && !selectedRoute ? (
-        <div className="bus-popup" role="dialog" aria-label="Bus station browser">
+      {showStationPopup && browse && currentStation ? (
+        <div
+          ref={popupRef}
+          className={`bus-popup${lineSelected ? "" : " compact"}`}
+          role="dialog"
+          aria-label={lineSelected ? "Selected bus" : "Buses at this station"}
+        >
           <div className="bus-popup-toolbar">
             <div className="bus-popup-buses">
-              {browse.buses.map((bus) => {
+              {orderedBuses.map((bus) => {
                 const known = busFrequencyKnown.get(bus) === true;
                 const active = bus === browse.bus;
                 return (
@@ -2415,6 +3251,7 @@ export function TransitMap({
                     ]
                       .filter(Boolean)
                       .join(" ")}
+                    aria-pressed={active}
                     onClick={() => selectBus(bus)}
                   >
                     {routeChipLabel(bus)}
@@ -2422,7 +3259,7 @@ export function TransitMap({
                 );
               })}
             </div>
-            {browse.bus ? (
+            {lineSelected ? (
               <button
                 type="button"
                 className="bus-popup-reset"
@@ -2434,8 +3271,9 @@ export function TransitMap({
               </button>
             ) : null}
           </div>
-          {browse.bus ? (
+          {lineSelected ? (
             <>
+              <div className="popup-headway">
               <p
                 className={
                   lineHeadwaySeconds != null && lineHeadwaySeconds > 0
@@ -2460,13 +3298,10 @@ export function TransitMap({
                   </button>
                 ) : null}
               </p>
+              </div>
 
-              <div className="popup-trip-ends" aria-label="Get on and get off">
-                <button
-                  type="button"
-                  className={`popup-end board${browse.scrollEnd === "board" ? " active" : ""}`}
-                  onClick={() => focusScrollEnd("board")}
-                >
+              <div className="popup-trip-ends">
+                <div className="popup-end board">
                   <em>Get on</em>
                   <strong>{effectiveBoard?.name ?? "…"}</strong>
                   <span>
@@ -2478,12 +3313,8 @@ export function TransitMap({
                         ) ?? "")
                       : ""}
                   </span>
-                </button>
-                <button
-                  type="button"
-                  className={`popup-end alight${browse.scrollEnd === "alight" ? " active" : ""}`}
-                  onClick={() => focusScrollEnd("alight")}
-                >
+                </div>
+                <div className="popup-end alight">
                   <em>Get off</em>
                   <strong>
                     {effectiveAlight?.name ??
@@ -2498,8 +3329,16 @@ export function TransitMap({
                         ) ?? "")
                       : ""}
                   </span>
-                </button>
+                </div>
               </div>
+              <button
+                type="button"
+                className="view-all-stops"
+                disabled={!tripPath}
+                onClick={frameWholeJourney}
+              >
+                View all stops
+              </button>
 
               {pathLoading ? (
                 <p className="popup-muted">Loading path…</p>
@@ -2561,7 +3400,12 @@ export function TransitMap({
                   {walkSummary.walkToBoard != null ? (
                     <p>
                       <span>Walk to stop</span>
-                      <strong>{formatWalkLeg(walkSummary.walkToBoard)}</strong>
+                      <strong>
+                        {formatWalkLeg(
+                          walkSummary.walkToBoard,
+                          walkSummary.walkToBoardSeconds,
+                        )}
+                      </strong>
                     </p>
                   ) : null}
                   {walkSummary.rideLabel ? (
@@ -2573,11 +3417,23 @@ export function TransitMap({
                   {walkSummary.walkFromAlight != null ? (
                     <p>
                       <span>Walk after</span>
-                      <strong>{formatWalkLeg(walkSummary.walkFromAlight)}</strong>
+                      <strong>
+                        {formatWalkLeg(
+                          walkSummary.walkFromAlight,
+                          walkSummary.walkFromAlightSeconds,
+                        )}
+                      </strong>
                     </p>
                   ) : null}
                 </div>
               ) : null}
+              <WalkAmenityList
+                amenities={stationWalkAmenities}
+                category={walkAmenityCategory}
+                onSelect={(amenity) =>
+                  frameWalkWithAmenity({ lng: amenity.lng, lat: amenity.lat })
+                }
+              />
             </>
           ) : (
             <>

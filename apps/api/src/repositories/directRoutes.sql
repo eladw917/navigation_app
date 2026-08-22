@@ -172,6 +172,7 @@ SELECT
   source_sha256
 FROM ranked
 WHERE line_rank = 1
+  AND estimated_walk_seconds <= $12
 ORDER BY
   -- Prefer light rail / train before buses so PLAN_RESULT_LIMIT does not drown them out.
   CASE route_type

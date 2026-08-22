@@ -33,6 +33,32 @@ describe("API security headers and CORS", () => {
     }
   });
 
+  it("rejects walk-route queries outside Israel", async () => {
+    const app = await buildServer();
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: "/v1/walk-route?fromLng=2&fromLat=40&toLng=2.01&toLat=40.01",
+      });
+      assert.equal(response.statusCode, 400);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects walk-amenity queries outside Israel", async () => {
+    const app = await buildServer();
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: "/v1/walk-amenities?south=40&west=2&north=40.02&east=2.02",
+      });
+      assert.equal(response.statusCode, 400);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("rejects oversized place queries", async () => {
     const app = await buildServer();
     try {

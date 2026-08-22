@@ -9,7 +9,7 @@ async function main() {
     app.log.info(`Docs at http://127.0.0.1:${env.PORT}/docs`);
   }
   if (env.HEIGIT_API_KEY === "missing") {
-    app.log.warn("HEIGIT_API_KEY is unset; geocoding and isochrones use free fallbacks");
+    app.log.warn("HEIGIT_API_KEY is unset; geocoding, isochrones, and walk routes use free fallbacks");
   }
   if (env.NODE_ENV === "production" && env.corsAllowlist.length === 0) {
     app.log.warn("CORS_ORIGINS is empty in production; browser origins are denied");

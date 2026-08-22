@@ -5,6 +5,7 @@ import {
   type FrequencyMaxMinutes,
   type TotalTimeMaxMinutes,
 } from "../mergePlans";
+import { WALK_AMENITY_OPTIONS, type WalkAmenityFilter } from "../walkAmenities";
 import { SelectChip, type SelectChipOption } from "./ui/SelectChip";
 
 type ModeChoice = "both" | PlanMode;
@@ -19,6 +20,10 @@ type Props = {
   onFrequencyChange: (value: FrequencyMaxMinutes) => void;
   maxTotalTimeMinutes: TotalTimeMaxMinutes;
   onTotalTimeChange: (value: TotalTimeMaxMinutes) => void;
+  walkAmenity: WalkAmenityFilter;
+  onWalkAmenityChange: (value: WalkAmenityFilter) => void;
+  /** Overpass amenities must be loaded before this filter can apply. */
+  walkAmenityDisabled?: boolean;
   /** Live count of options after filters — proves filters are applying. */
   resultCount?: number | null;
   /** Filters only apply to a computed plan, so they stay inert before one exists. */
@@ -41,6 +46,9 @@ export function FilterBar({
   onFrequencyChange,
   maxTotalTimeMinutes,
   onTotalTimeChange,
+  walkAmenity,
+  onWalkAmenityChange,
+  walkAmenityDisabled = false,
   resultCount = null,
   disabled = false,
 }: Props) {
@@ -101,6 +109,14 @@ export function FilterBar({
         options={totalOptions}
         disabled={disabled}
         onChange={(next) => onTotalTimeChange(Number(next) as TotalTimeMaxMinutes)}
+      />
+      <SelectChip
+        icon="shop"
+        label="On the walk"
+        value={walkAmenity}
+        options={WALK_AMENITY_OPTIONS}
+        disabled={disabled || walkAmenityDisabled}
+        onChange={onWalkAmenityChange}
       />
       {resultCount != null ? (
         <span className="filter-result-count" aria-live="polite">

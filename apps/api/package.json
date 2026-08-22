@@ -10,7 +10,7 @@
     "start": "node dist/index.js",
     "migrate": "tsx src/migrate.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test src/httpSecurity.test.ts src/server.security.test.ts src/services/lruCache.test.ts src/services/orsIsochrone.test.ts src/services/geocoder.test.ts src/services/planner.integration.test.ts"
+    "test": "node --import tsx --test src/httpSecurity.test.ts src/server.security.test.ts src/services/lruCache.test.ts src/services/orsIsochrone.test.ts src/services/orsDirections.test.ts src/services/geocoder.test.ts src/services/walkAmenities.test.ts src/services/planner.integration.test.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.0.0",

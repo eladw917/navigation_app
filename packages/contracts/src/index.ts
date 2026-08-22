@@ -220,6 +220,55 @@ export const StopDeparturesResponseSchema = z.object({
 });
 export type StopDeparturesResponse = z.infer<typeof StopDeparturesResponseSchema>;
 
+/** OSM amenities that can appear on a walk-to-stop / walk-from-stop corridor. */
+export const WalkAmenityCategorySchema = z.enum([
+  "cafe",
+  "grocery",
+  "bakery",
+  "pharmacy",
+  "atm",
+  "park",
+]);
+export type WalkAmenityCategory = z.infer<typeof WalkAmenityCategorySchema>;
+
+export const WalkAmenitySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  category: WalkAmenityCategorySchema,
+  lng: z.number(),
+  lat: z.number(),
+});
+export type WalkAmenity = z.infer<typeof WalkAmenitySchema>;
+
+export const WalkAmenitiesResponseSchema = z.object({
+  amenities: z.array(WalkAmenitySchema),
+  meta: z.object({
+    cached: z.boolean(),
+    elapsedMs: z.number(),
+    source: z.string(),
+  }),
+});
+export type WalkAmenitiesResponse = z.infer<typeof WalkAmenitiesResponseSchema>;
+
+/** Street-network walk (ORS Directions) with a straight-line fallback. */
+export const WalkRouteResponseSchema = z.object({
+  from: LatLngSchema,
+  to: LatLngSchema,
+  distanceMeters: z.number().nonnegative(),
+  durationSeconds: z.number().nonnegative(),
+  geometry: z.object({
+    type: z.literal("LineString"),
+    coordinates: z.array(z.tuple([z.number(), z.number()])).min(2),
+  }),
+  meta: z.object({
+    cached: z.boolean(),
+    approximated: z.boolean(),
+    elapsedMs: z.number(),
+    source: z.enum(["ors", "straight_line"]),
+  }),
+});
+export type WalkRouteResponse = z.infer<typeof WalkRouteResponseSchema>;
+
 /** Approximate Israel bounding box used for request validation. */
 export const ISRAEL_BOUNDS = {
   minLng: 34.2,

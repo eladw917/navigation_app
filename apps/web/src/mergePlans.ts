@@ -286,6 +286,29 @@ export type FrequencyMaxMinutes = 5 | 10 | 20 | 30 | "all";
 
 export const FREQUENCY_MAX_OPTIONS: FrequencyMaxMinutes[] = [5, 10, 20, 30, "all"];
 
+/** Lowest headway wins. Routes with unknown frequency sort last. */
+export function pickMostFrequentRoute(routes: DirectRoute[]): DirectRoute | null {
+  if (!routes.length) return null;
+  let best: DirectRoute | null = null;
+  let bestHeadway = Number.POSITIVE_INFINITY;
+  for (const route of routes) {
+    const headway =
+      route.headwaySeconds != null && route.headwaySeconds > 0
+        ? route.headwaySeconds
+        : Number.POSITIVE_INFINITY;
+    if (!best) {
+      best = route;
+      bestHeadway = headway;
+      continue;
+    }
+    if (headway < bestHeadway) {
+      best = route;
+      bestHeadway = headway;
+    }
+  }
+  return best;
+}
+
 export type TotalTimeMaxMinutes = 30 | 45 | 60 | 90;
 
 export const TOTAL_TIME_MAX_OPTIONS: TotalTimeMaxMinutes[] = [30, 45, 60, 90];
@@ -521,7 +544,13 @@ export function applyResultFilters(
     routes = routes.filter((r) => {
       const legs = walkLegsSeconds(r, filters.origin!, filters.destination!);
       const total = legs.toBoard + legs.fromAlight;
-      return total <= maxSecs && walkMinutesDisplayed(total) <= maxMins;
+      // Street distance is longer than the plan chord; keep each leg inside the slider.
+      return (
+        legs.toBoard * 1.3 <= maxSecs &&
+        legs.fromAlight * 1.3 <= maxSecs &&
+        total <= maxSecs &&
+        walkMinutesDisplayed(total) <= maxMins
+      );
     });
   }
 
