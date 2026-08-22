@@ -10,7 +10,7 @@ import {
   isNextDepartureSoon,
   pickNextCatchableDeparture,
 } from "./formatDeparture";
-import { headwayToBucket, stationHeadwayFromLines } from "./frequency";
+import { headwayToBucket, stationFrequencyBucket, stationHeadwayFromLines } from "./frequency";
 
 function mergeRoles(
   a: ValidStop["role"],
@@ -34,10 +34,14 @@ function mergeRouteFrequencies(
       byName.set(item.routeShortName, item);
       continue;
     }
-    // Prefer a known headway over unknown; among known, keep the more frequent.
+    // Prefer a known headway, then confirmed-empty ("none"), then unknown.
     const prevKnown = prev.headwaySeconds != null && prev.headwaySeconds > 0;
     const nextKnown = item.headwaySeconds != null && item.headwaySeconds > 0;
     if (nextKnown && (!prevKnown || item.headwaySeconds! < prev.headwaySeconds!)) {
+      byName.set(item.routeShortName, item);
+      continue;
+    }
+    if (!prevKnown && !nextKnown && item.frequencyBucket === "none" && prev.frequencyBucket !== "none") {
       byName.set(item.routeShortName, item);
     }
   }
@@ -45,11 +49,12 @@ function mergeRouteFrequencies(
 }
 
 function withStationFrequency(stop: ValidStop): ValidStop {
-  const headwaySeconds = stationHeadwayFromLines(stop.routeFrequencies ?? []);
+  const freqs = stop.routeFrequencies ?? [];
+  const headwaySeconds = stationHeadwayFromLines(freqs);
   return {
     ...stop,
     headwaySeconds,
-    frequencyBucket: headwayToBucket(headwaySeconds),
+    frequencyBucket: stationFrequencyBucket(freqs),
   };
 }
 
@@ -307,24 +312,29 @@ export function overlayHeadwaysFromDepartures(
     return {
       ...route,
       headwaySeconds,
-      frequencyBucket: headwayToBucket(headwaySeconds),
+      frequencyBucket: headwayToBucket(headwaySeconds, headwaySeconds == null),
     };
   });
 
   const bestByStopLine = new Map<string, number>();
+  const noneByStopLine = new Set<string>();
   for (const route of routes) {
     const key = routeOptionKey(route);
     if (!headwayByKey.has(key)) continue;
-    const headway = route.headwaySeconds;
-    if (headway == null || !Number.isFinite(headway) || headway <= 0) continue;
     const type = route.routeType ?? 3;
     const plain = route.routeShortName?.trim() || route.routeId;
     const names = lineNameKeys(`${type}:${plain}`);
+    const headway = route.headwaySeconds;
+    const hasHeadway = headway != null && Number.isFinite(headway) && headway > 0;
     for (const stopId of [route.boardStopId, route.alightStopId]) {
       for (const name of names) {
         const lineKey = `${stopId}|${name}`;
-        const prev = bestByStopLine.get(lineKey);
-        if (prev == null || headway < prev) bestByStopLine.set(lineKey, headway);
+        if (hasHeadway) {
+          const prev = bestByStopLine.get(lineKey);
+          if (prev == null || headway < prev) bestByStopLine.set(lineKey, headway);
+        } else {
+          noneByStopLine.add(lineKey);
+        }
       }
     }
   }
@@ -334,17 +344,30 @@ export function overlayHeadwaysFromDepartures(
     let changed = false;
     const routeFrequencies = stop.routeFrequencies.map((freq) => {
       let headway: number | undefined;
+      let sawNone = false;
       for (const name of lineNameKeys(freq.routeShortName)) {
         const found = bestByStopLine.get(`${stop.stopId}|${name}`);
         if (found != null && (headway == null || found < headway)) headway = found;
+        if (noneByStopLine.has(`${stop.stopId}|${name}`)) sawNone = true;
       }
-      if (headway == null) return freq;
-      changed = true;
-      return {
-        ...freq,
-        headwaySeconds: headway,
-        frequencyBucket: headwayToBucket(headway),
-      };
+      if (headway != null) {
+        changed = true;
+        return {
+          ...freq,
+          headwaySeconds: headway,
+          frequencyBucket: headwayToBucket(headway),
+        };
+      }
+      if (sawNone) {
+        changed = true;
+        return {
+          ...freq,
+          headwaySeconds: null,
+          frequencyBucket: "none" as const,
+          departureCount: 0,
+        };
+      }
+      return freq;
     });
     if (!changed) return stop;
     return withStationFrequency({ ...stop, routeFrequencies });

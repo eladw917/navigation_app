@@ -316,7 +316,7 @@ export function SelectedRoutePanel({
         <div className="selected-route-meta">
           <span className="route-freq">
             <Icon name="leaf" size={13} />
-            {formatHeadway(route.headwaySeconds)}
+            {formatHeadway(route.headwaySeconds, route.frequencyBucket)}
           </span>
           <span className="route-next">
             Next: <strong>{nextLabel ?? "—"}</strong>

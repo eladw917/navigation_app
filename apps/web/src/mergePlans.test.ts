@@ -138,6 +138,21 @@ describe("overlayHeadwaysFromDepartures", () => {
     const plan = stubPlan([stubRoute()]);
     assert.equal(overlayHeadwaysFromDepartures(plan, {}), plan);
   });
+
+  it("marks a confirmed empty hour as none, not unknown", () => {
+    const route = stubRoute();
+    const plan = stubPlan([route]);
+    const now = 8 * 3600;
+    const overlaid = overlayHeadwaysFromDepartures(plan, {
+      [routeOptionKey(route)]: stubDeps([now + 2 * 3600], now),
+    });
+    assert.ok(overlaid);
+    assert.equal(overlaid!.routes[0].headwaySeconds, null);
+    assert.equal(overlaid!.routes[0].frequencyBucket, "none");
+    assert.equal(overlaid!.validStops[0].headwaySeconds, null);
+    assert.equal(overlaid!.validStops[0].frequencyBucket, "none");
+    assert.equal(overlaid!.validStops[0].routeFrequencies?.[0]?.frequencyBucket, "none");
+  });
 });
 
 describe("applyResultFilters", () => {

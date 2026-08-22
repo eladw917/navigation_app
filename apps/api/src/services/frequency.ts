@@ -1,8 +1,15 @@
 import type { FrequencyBucket } from "@navigation/contracts";
 
-export function headwayToBucket(headwaySeconds: number | null | undefined): FrequencyBucket {
+/**
+ * @param emptyWindow true when we successfully counted 0 departures in the hour
+ * (as opposed to missing / failed stats).
+ */
+export function headwayToBucket(
+  headwaySeconds: number | null | undefined,
+  emptyWindow = false,
+): FrequencyBucket {
   if (headwaySeconds == null || !Number.isFinite(headwaySeconds) || headwaySeconds <= 0) {
-    return "unknown";
+    return emptyWindow ? "none" : "unknown";
   }
   const minutes = headwaySeconds / 60;
   if (minutes < 5) return "under_5";
@@ -11,7 +18,11 @@ export function headwayToBucket(headwaySeconds: number | null | undefined): Freq
   return "over_30";
 }
 
-export function formatHeadway(headwaySeconds: number | null | undefined): string {
+export function formatHeadway(
+  headwaySeconds: number | null | undefined,
+  bucket?: FrequencyBucket,
+): string {
+  if (bucket === "none") return "No buses in the next hour";
   if (headwaySeconds == null || !Number.isFinite(headwaySeconds) || headwaySeconds <= 0) {
     return "Frequency unknown";
   }

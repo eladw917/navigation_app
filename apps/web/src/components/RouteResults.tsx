@@ -70,7 +70,7 @@ export function RouteResults({
             origin && destination
               ? totalJourneySeconds(route, origin, destination)
               : null;
-          const freq = formatHeadway(route.headwaySeconds);
+          const freq = formatHeadway(route.headwaySeconds, route.frequencyBucket);
           const deps = departuresByKey[key];
           const walkToBoardSecs =
             origin && destination

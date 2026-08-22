@@ -1,6 +1,12 @@
 export type LatLng = { lng: number; lat: number };
 export type PlanMode = "walk_transit" | "transit_walk";
-export type FrequencyBucket = "under_5" | "about_10" | "about_20" | "over_30" | "unknown";
+export type FrequencyBucket =
+  | "under_5"
+  | "about_10"
+  | "about_20"
+  | "over_30"
+  | "unknown"
+  | "none";
 
 export type PlaceResult = {
   id: string;

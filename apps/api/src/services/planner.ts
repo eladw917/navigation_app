@@ -278,14 +278,14 @@ export async function planDirect(request: DirectPlanRequest, signal?: AbortSigna
         : filterActive
           ? []
           : allNames;
-    // Include every line at the stop; unknown headway stays null (excluded from station freq).
+    // Include every line at the stop; missing window stats stay null (excluded from station freq).
     const routeFrequencies: RouteFrequency[] = routeShortNames.map((name) => {
       const freq = routeFreqMap?.get(name);
       return (
         freq ?? {
           routeShortName: name,
           headwaySeconds: null,
-          frequencyBucket: headwayToBucket(null),
+          frequencyBucket: headwayToBucket(null, scheduleStatsOk),
           departureCount: 0,
         }
       );
@@ -305,7 +305,10 @@ export async function planDirect(request: DirectPlanRequest, signal?: AbortSigna
       role: row.role,
       routeShortNames,
       headwaySeconds,
-      frequencyBucket: headwayToBucket(headwaySeconds),
+      frequencyBucket: headwayToBucket(
+        headwaySeconds,
+        scheduleStatsOk && (headwaySeconds == null || headwaySeconds <= 0),
+      ),
       routeFrequencies,
     };
   });
@@ -337,7 +340,7 @@ export async function planDirect(request: DirectPlanRequest, signal?: AbortSigna
       alightLng: Number(row.alight_lng),
       alightLat: Number(row.alight_lat),
       headwaySeconds: freq?.headwaySeconds ?? null,
-      frequencyBucket: freq?.frequencyBucket ?? headwayToBucket(null),
+      frequencyBucket: freq?.frequencyBucket ?? headwayToBucket(null, scheduleStatsOk),
       rideDurationSeconds:
         row.ride_duration_seconds == null ? null : Number(row.ride_duration_seconds),
     };

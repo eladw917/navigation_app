@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import maplibregl, { type GeoJSONSource, type Map as MapLibreMap, type MapLayerMouseEvent } from "maplibre-gl";
-import { formatHeadway, headwayToBucket, stationHeadwayFromLines } from "../frequency";
+import { bucketRadius, DEFAULT_PIN_RADIUS, formatHeadway, stationFrequencyBucket } from "../frequency";
 import {
   formatNextBusIn,
   formatStopClock,
@@ -103,8 +103,11 @@ function appendCoordinatePoints(value: unknown, points: LatLng[]): void {
 }
 
 /** Avoid MapLibre world-zoom when padding exceeds the map container size. */
-const MAP_EDGE_PAD = { top: 56, bottom: 56, left: 44, right: 44 };
+/** Padding around fitted points so A/B pins + address chips are not clipped. */
+const MAP_EDGE_PAD = { top: 112, bottom: 64, left: 60, right: 60 };
 const FIT_INSET = { top: 20, bottom: 20, left: 20, right: 20 };
+/** Floor for top padding when the station card owns the bottom (pin + label). */
+const MIN_PIN_TOP_PAD = 96;
 
 function visibleBusPopup(map: MapLibreMap): HTMLElement | null {
   const el = map.getContainer().parentElement?.querySelector(".bus-popup");
@@ -129,6 +132,7 @@ function clampFramePadding(
     ? Math.max(80, Math.floor(h * 0.18))
     : Math.max(180, Math.floor(h * 0.42));
   const minInnerW = Math.max(160, Math.floor(w * 0.5));
+  const minTop = keepBottom ? Math.max(minPad, MIN_PIN_TOP_PAD) : minPad;
   let top = requested.top;
   let bottom = requested.bottom;
   let left = requested.left;
@@ -138,7 +142,7 @@ function clampFramePadding(
     const inner = h - top - bottom;
     if (inner >= minInnerH) return;
     const need = minInnerH - inner;
-    const cutTop = Math.min(need, Math.max(0, top - minPad));
+    const cutTop = Math.min(need, Math.max(0, top - minTop));
     top -= cutTop;
     const still = need - cutTop;
     if (still > 0 && !keepBottom) bottom = Math.max(minPad, bottom - still);
@@ -238,7 +242,10 @@ function safeFitBounds(
   for (const p of valid) bounds.extend([p.lng, p.lat]);
   if (bounds.isEmpty()) return;
 
-  const cam = cameraForPaddedBounds(map, bounds, padding, maxZoom);
+  let cam = cameraForPaddedBounds(map, bounds, padding, maxZoom);
+  if (!cam?.center) {
+    cam = cameraForPaddedBounds(map, bounds, MAP_EDGE_PAD, maxZoom);
+  }
   if (!cam?.center) return;
   const zoom = Math.max(minZoom, Math.min(maxZoom, cam.zoom ?? maxZoom));
 
@@ -438,6 +445,23 @@ function formatWalkLeg(meters: number, seconds?: number): string {
   return `${(m / 1000).toFixed(1)} km · ~${minutes} min`;
 }
 
+function stopClockSecs(stop: TripStop): number | null {
+  const secs = stop.isBoard
+    ? (stop.departureSecs ?? stop.arrivalSecs)
+    : (stop.arrivalSecs ?? stop.departureSecs);
+  return secs != null && Number.isFinite(secs) ? secs : null;
+}
+
+/** Scheduled time from one stop to the next on the same trip. */
+function formatStopGap(from: TripStop, to: TripStop): string | null {
+  const a = stopClockSecs(from);
+  const b = stopClockSecs(to);
+  if (a == null || b == null) return null;
+  const mins = Math.round((b - a) / 60);
+  if (mins <= 0) return "<1 min";
+  return `${mins} min`;
+}
+
 function formatRideDuration(seconds: number | null | undefined): string | null {
   if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return null;
   if (seconds === 0) return "~0 min";
@@ -554,6 +578,27 @@ function plannedStationsAlongTrip(
   if (ordered.length) return ordered;
   const chosen = chosenId ? lineStations.find((s) => s.stopId === chosenId) : null;
   return chosen ? [chosen] : [];
+}
+
+/** Stops on this GTFS trip you can step: get-on is everything before get-off (including before the suggested board). */
+function lineStepperStations(
+  lineStations: LineStation[],
+  end: "board" | "alight",
+  chosenBoardId: string | null,
+  chosenAlightId: string | null,
+): LineStation[] {
+  if (!lineStations.length) return [];
+  const alightId = chosenAlightId ?? lineStations.find((s) => s.isAlight)?.stopId ?? null;
+  const boardId = chosenBoardId ?? lineStations.find((s) => s.isBoard)?.stopId ?? null;
+  let alightIdx = alightId ? lineStations.findIndex((s) => s.stopId === alightId) : -1;
+  let boardIdx = boardId ? lineStations.findIndex((s) => s.stopId === boardId) : -1;
+  if (end === "board") {
+    if (alightIdx < 0) alightIdx = lineStations.length;
+    return lineStations.slice(0, Math.max(1, alightIdx));
+  }
+  if (boardIdx < 0) boardIdx = -1;
+  const after = lineStations.slice(boardIdx + 1);
+  return after.length ? after : boardIdx >= 0 ? [lineStations[boardIdx]!] : [];
 }
 
 function routeChipLabel(busKey: string): string {
@@ -755,13 +800,14 @@ function pinFreqBucket(
   buses: string[],
   routes: DirectRoute[],
   end: "board" | "alight" | "either",
-): FrequencyBucket | "unknown" {
+): FrequencyBucket {
   // Size from relevant plan buses only (unknown line freqs ignored).
   const lines = buses.map((bus) => {
     const atStop = stop.routeFrequencies?.find(
       (r) => r.routeShortName === bus || r.routeShortName === busShortName(bus),
     );
     let headwaySeconds = atStop?.headwaySeconds ?? null;
+    let frequencyBucket = atStop?.frequencyBucket;
     if (headwaySeconds == null || headwaySeconds <= 0) {
       const route = routes.find((r) => {
         if (routeBusName(r) !== bus) return false;
@@ -769,14 +815,19 @@ function pinFreqBucket(
         if (end === "board") return r.boardStopId === stop.stopId;
         return r.boardStopId === stop.stopId || r.alightStopId === stop.stopId;
       });
-      headwaySeconds = route?.headwaySeconds ?? null;
+      if (route) {
+        if (route.headwaySeconds != null && route.headwaySeconds > 0) {
+          headwaySeconds = route.headwaySeconds;
+          frequencyBucket = route.frequencyBucket;
+        } else if (frequencyBucket !== "none") {
+          frequencyBucket = route.frequencyBucket ?? frequencyBucket;
+        }
+      }
     }
-    return { headwaySeconds };
+    return { headwaySeconds, frequencyBucket };
   });
 
-  const stationHeadway = stationHeadwayFromLines(lines);
-  if (stationHeadway != null) return headwayToBucket(stationHeadway);
-  return "unknown";
+  return stationFrequencyBucket(lines);
 }
 
 function pickRouteForBus(
@@ -869,6 +920,9 @@ function journeyFitPoints(
     tripPath.geometry.coordinates.length >= 2
       ? (tripPath.geometry.coordinates as [number, number][])
       : tripPath.stops.map((s) => [s.lng, s.lat] as [number, number]);
+  for (const stop of tripPath.stops) {
+    if (stop.onPath) push(stop.lng, stop.lat);
+  }
   if (board && alight && allCoords.length >= 2) {
     const startIdx = nearestCoordIndex(allCoords, board);
     let endIdx = nearestCoordIndex(allCoords, alight);
@@ -1102,6 +1156,51 @@ function validStopToLineStation(stop: ValidStop, origin: LatLng | null): LineSta
   };
 }
 
+function freqForBus(
+  plan: DirectPlanResponse,
+  bus: string,
+  currentStation: LineStation | null,
+  stopMeta: Map<string, ValidStop>,
+  preferredStopId: string | null,
+): { headwaySeconds: number | null; frequencyBucket: FrequencyBucket } {
+  const atCurrent = currentStation?.routeFrequencies?.find(
+    (r) => r.routeShortName === bus || r.routeShortName === busShortName(bus),
+  );
+  if (atCurrent) {
+    return {
+      headwaySeconds: atCurrent.headwaySeconds ?? null,
+      frequencyBucket: atCurrent.frequencyBucket,
+    };
+  }
+  const atFocus = stopMeta
+    .get(preferredStopId ?? "")
+    ?.routeFrequencies?.find(
+      (r) => r.routeShortName === bus || r.routeShortName === busShortName(bus),
+    );
+  if (atFocus) {
+    return {
+      headwaySeconds: atFocus.headwaySeconds ?? null,
+      frequencyBucket: atFocus.frequencyBucket,
+    };
+  }
+  for (const stop of plan.validStops) {
+    const freq = stop.routeFrequencies?.find(
+      (r) => r.routeShortName === bus || r.routeShortName === busShortName(bus),
+    );
+    if (freq) {
+      return {
+        headwaySeconds: freq.headwaySeconds ?? null,
+        frequencyBucket: freq.frequencyBucket,
+      };
+    }
+  }
+  const route = plan.routes.find((r) => routeMatchesBus(r, bus));
+  return {
+    headwaySeconds: route?.headwaySeconds ?? null,
+    frequencyBucket: route?.frequencyBucket ?? "unknown",
+  };
+}
+
 function headwayForBus(
   plan: DirectPlanResponse,
   bus: string,
@@ -1109,24 +1208,7 @@ function headwayForBus(
   stopMeta: Map<string, ValidStop>,
   preferredStopId: string | null,
 ): number | null {
-  const atCurrent = currentStation?.routeFrequencies?.find(
-    (r) => r.routeShortName === bus || r.routeShortName === busShortName(bus),
-  );
-  if (atCurrent) return atCurrent.headwaySeconds ?? null;
-  const atFocus = stopMeta
-    .get(preferredStopId ?? "")
-    ?.routeFrequencies?.find(
-      (r) => r.routeShortName === bus || r.routeShortName === busShortName(bus),
-    );
-  if (atFocus) return atFocus.headwaySeconds ?? null;
-  for (const stop of plan.validStops) {
-    const freq = stop.routeFrequencies?.find(
-      (r) => r.routeShortName === bus || r.routeShortName === busShortName(bus),
-    );
-    if (freq) return freq.headwaySeconds ?? null;
-  }
-  const route = plan.routes.find((r) => routeMatchesBus(r, bus));
-  return route?.headwaySeconds ?? null;
+  return freqForBus(plan, bus, currentStation, stopMeta, preferredStopId).headwaySeconds;
 }
 
 /** Distinct from station pins: boarding is a circle; get-off is a down arrow. Amenities are squares. */
@@ -1330,6 +1412,11 @@ export function TransitMap({
   const [popupDeparturesLoading, setPopupDeparturesLoading] = useState(false);
   const [overviewFocus, setOverviewFocus] = useState<MapFocus>("board");
   const [popupHeight, setPopupHeight] = useState(0);
+  const [showAllStations, setShowAllStations] = useState(false);
+
+  useEffect(() => {
+    setShowAllStations(false);
+  }, [browse?.bus]);
   const popupRef = useRef<HTMLDivElement | null>(null);
   const boardFrameRef = useRef<LatLng[]>([]);
   const alightFrameRef = useRef<LatLng[]>([]);
@@ -1340,6 +1427,8 @@ export function TransitMap({
   const restoreAfterAmenityRef = useRef<() => void>(() => undefined);
   /** auto = overview/journey may refit. end = get-on/get-off walk. poi = amenity. */
   const cameraHoldRef = useRef<"auto" | "end" | "poi">("auto");
+  const forceJourneyFitRef = useRef(false);
+  const [journeyFitNonce, setJourneyFitNonce] = useState(0);
   const fittedPlanId = useRef<string | null>(null);
   const fittedPathKey = useRef<string | null>(null);
 
@@ -1394,11 +1483,18 @@ export function TransitMap({
   const chosenAlightId = browse?.chosenAlightId ?? recommendedAlightId;
 
   /**
-   * Stepper lists are the plan's get-on / get-off options for this line, not the
-   * full GTFS trip (terminus, earlier feeders, etc.).
+   * Get on: trip stops before get-off (including those before the suggested board).
+   * Get off: trip stops after get-on.
    */
   const boardScrollStations = useMemo((): LineStation[] => {
     if (!browse?.bus || !plan) return [];
+    const alongLine = lineStepperStations(
+      lineStations,
+      "board",
+      chosenBoardId,
+      chosenAlightId,
+    );
+    if (alongLine.length) return alongLine;
     return plannedStationsAlongTrip(
       lineStations,
       plan,
@@ -1413,6 +1509,13 @@ export function TransitMap({
 
   const alightScrollStations = useMemo((): LineStation[] => {
     if (!browse?.bus || !plan) return [];
+    const alongLine = lineStepperStations(
+      lineStations,
+      "alight",
+      chosenBoardId,
+      chosenAlightId,
+    );
+    if (alongLine.length) return alongLine;
     return plannedStationsAlongTrip(
       lineStations,
       plan,
@@ -1467,17 +1570,24 @@ export function TransitMap({
     return stopMeta.get(currentStation.stopId)?.headwaySeconds ?? null;
   }, [currentStation, stopMeta]);
 
-  const lineHeadwaySeconds = useMemo(() => {
-    if (!browse?.bus || !plan) return null;
-    return headwayForBus(plan, browse.bus, currentStation, stopMeta, browse.preferredStopId);
+  const lineFreq = useMemo(() => {
+    if (!browse?.bus || !plan) {
+      return { headwaySeconds: null as number | null, frequencyBucket: "unknown" as FrequencyBucket };
+    }
+    return freqForBus(plan, browse.bus, currentStation, stopMeta, browse.preferredStopId);
   }, [browse, plan, currentStation, stopMeta]);
 
-  const busFrequencyKnown = useMemo(() => {
-    if (!browse || !plan) return new Map<string, boolean>();
-    const map = new Map<string, boolean>();
+  const lineHeadwaySeconds = lineFreq.headwaySeconds;
+  const lineFrequencyBucket = lineFreq.frequencyBucket;
+
+  const busFrequency = useMemo(() => {
+    if (!browse || !plan) return new Map<string, FrequencyBucket>();
+    const map = new Map<string, FrequencyBucket>();
     for (const bus of browse.buses) {
-      const secs = headwayForBus(plan, bus, currentStation, stopMeta, browse.preferredStopId);
-      map.set(bus, secs != null && secs > 0);
+      map.set(
+        bus,
+        freqForBus(plan, bus, currentStation, stopMeta, browse.preferredStopId).frequencyBucket,
+      );
     }
     return map;
   }, [browse, plan, currentStation, stopMeta]);
@@ -1569,6 +1679,26 @@ export function TransitMap({
     if (browse?.scrollEnd === "alight" && currentStation) return currentStation;
     return alightStop;
   }, [chosenAlightId, lineStations, browse?.scrollEnd, currentStation, alightStop]);
+
+  const lineStationRide = useMemo(() => {
+    const stops = tripPath?.stops ?? [];
+    const boardIdx = effectiveBoard
+      ? stops.findIndex((s) => s.stopId === effectiveBoard.stopId)
+      : -1;
+    const alightIdx = effectiveAlight
+      ? stops.findIndex((s) => s.stopId === effectiveAlight.stopId)
+      : -1;
+    return { boardIdx, alightIdx };
+  }, [tripPath, effectiveBoard?.stopId, effectiveAlight?.stopId]);
+
+  const allStationsListRef = useRef<HTMLOListElement | null>(null);
+  useEffect(() => {
+    if (!showAllStations) return;
+    const list = allStationsListRef.current;
+    const row = list?.querySelector(".is-board") as HTMLElement | null;
+    if (!list || !row) return;
+    list.scrollTop = Math.max(0, row.offsetTop - list.clientHeight / 3);
+  }, [showAllStations, lineStationRide.boardIdx]);
 
   const stationWalkAmenities = useMemo(() => {
     if (walkAmenityCategory === "any" || !walkAmenities.length) return [];
@@ -2022,6 +2152,7 @@ export function TransitMap({
     openedFromCardRef.current = null;
     setBrowse(null);
     setTripPath(null);
+    setShowAllStations(false);
     setPathLoading(false);
     setPathError(null);
     setPopupDepartures(null);
@@ -2050,7 +2181,7 @@ export function TransitMap({
       maxZoom: 15,
       minZoom: 13,
       duration: 600,
-      padding: { ...MAP_EDGE_PAD, top: MAP_EDGE_PAD.top + 48 },
+      padding: MAP_EDGE_PAD,
     });
   }
 
@@ -2684,27 +2815,33 @@ export function TransitMap({
           "circle-radius": [
             "case",
             ["==", ["get", "dim"], true],
-            5,
+            4,
             ["==", ["get", "lineStop"], true],
-            5,
+            4,
             [
               "match",
               ["get", "freqBucket"],
               "under_5",
-              11,
+              bucketRadius("under_5"),
               "about_10",
-              9,
+              bucketRadius("about_10"),
               "about_20",
-              7,
+              bucketRadius("about_20"),
               "over_30",
-              5,
-              6.5,
+              bucketRadius("over_30"),
+              "none",
+              bucketRadius("none"),
+              "unknown",
+              bucketRadius("unknown"),
+              bucketRadius("unknown"),
             ],
           ],
           "circle-color": [
             "case",
             ["==", ["get", "dim"], true],
             "#94a3b8",
+            ["==", ["get", "freqBucket"], "none"],
+            "#22c55e",
             ["==", ["get", "freqBucket"], "unknown"],
             "#94a3b8",
             [
@@ -2763,26 +2900,7 @@ export function TransitMap({
           "icon-allow-overlap": true,
           "icon-ignore-placement": true,
           "icon-padding": 0,
-          "icon-size": [
-            "case",
-            ["==", ["get", "dim"], true],
-            0.88,
-            ["==", ["get", "lineStop"], true],
-            0.9,
-            [
-              "match",
-              ["get", "freqBucket"],
-              "under_5",
-              1.12,
-              "about_10",
-              1.04,
-              "about_20",
-              1,
-              "over_30",
-              0.92,
-              1,
-            ],
-          ],
+          "icon-size": DEFAULT_PIN_RADIUS / 13.25,
         },
         paint: {
           "icon-opacity": [
@@ -3113,30 +3231,74 @@ export function TransitMap({
         geometry: { type: "Point"; coordinates: [number, number] };
       }> = [];
 
+      const activeBoardId = browse?.bus ? (effectiveBoard?.stopId ?? null) : null;
+      const activeAlightId = browse?.bus ? (effectiveAlight?.stopId ?? null) : null;
+      const optionIds = new Set<string>();
+      // Keep get-on / get-off circles while a line is drawn; do not replace them
+      // with tiny ride-stop dots.
+      const mapPins = buildMapPins(
+        plan.routes,
+        stopMeta,
+        origin,
+        destination,
+        null,
+        null,
+      );
+      for (const { stop: s, boardBuses, alightBuses } of mapPins) {
+        optionIds.add(s.stopId);
+        const role =
+          alightBuses.length > 0 && boardBuses.length === 0
+            ? "alighting"
+            : boardBuses.length > 0 && alightBuses.length > 0
+              ? "both"
+              : "boarding";
+        const freqBuses =
+          role === "alighting"
+            ? alightBuses
+            : role === "boarding"
+              ? boardBuses
+              : [...new Set([...boardBuses, ...alightBuses])];
+        const freqEnd =
+          role === "alighting" ? "alight" : role === "boarding" ? "board" : "either";
+        const freqBucket = pinFreqBucket(s, freqBuses, plan.routes, freqEnd);
+        const buses = [...new Set([...boardBuses, ...alightBuses])];
+        features.push({
+          type: "Feature",
+          properties: {
+            stopId: s.stopId,
+            name: s.name,
+            role,
+            selected: s.stopId === activeBoardId || s.stopId === activeAlightId,
+            dim: false,
+            lineStop: false,
+            endpoint: role === "alighting" ? "alight" : "",
+            outside: !s.inWalkingArea,
+            buses: buses.join(","),
+            freqBucket,
+          },
+          geometry: {
+            type: "Point",
+            coordinates: [s.lng, s.lat],
+          },
+        });
+      }
+
       if (browse?.bus && tripPath) {
-        // Ride stops only (board → alight). Not the rest of the GTFS trip.
-        const activeBoardId = effectiveBoard?.stopId ?? null;
-        const activeAlightId = effectiveAlight?.stopId ?? null;
         for (const stop of tripPath.stops) {
           const isActiveBoard = activeBoardId != null && stop.stopId === activeBoardId;
           const isActiveAlight = activeAlightId != null && stop.stopId === activeAlightId;
           if (!stop.onPath && !isActiveBoard && !isActiveAlight) continue;
-          const role = isActiveAlight
-            ? "alighting"
-            : isActiveBoard
-              ? "boarding"
-              : stop.isAlight
-                ? "alighting"
-                : "boarding";
+          if (optionIds.has(stop.stopId)) continue;
+          const isEndpoint = isActiveBoard || isActiveAlight;
           features.push({
             type: "Feature",
             properties: {
               stopId: stop.stopId,
               name: stop.name,
-              role,
-              selected: Boolean(isActiveBoard || isActiveAlight),
+              role: isActiveAlight ? "alighting" : "boarding",
+              selected: isEndpoint,
               dim: false,
-              lineStop: true,
+              lineStop: !isEndpoint,
               endpoint: isActiveAlight ? "alight" : isActiveBoard ? "board" : "",
               outside: !walkingStopIds.has(stop.stopId),
               buses: browse.bus,
@@ -3148,61 +3310,15 @@ export function TransitMap({
             },
           });
         }
-      } else {
-        // No line selected: only plan board/alight option pins (no intermediate line stops).
-        const mapPins = buildMapPins(
-          plan.routes,
-          stopMeta,
-          origin,
-          destination,
-          null,
-          null,
-        );
-        for (const { stop: s, boardBuses, alightBuses } of mapPins) {
-          const role =
-            alightBuses.length > 0 && boardBuses.length === 0
-              ? "alighting"
-              : boardBuses.length > 0 && alightBuses.length > 0
-                ? "both"
-                : "boarding";
-          const freqBuses =
-            role === "alighting"
-              ? alightBuses
-              : role === "boarding"
-                ? boardBuses
-                : [...new Set([...boardBuses, ...alightBuses])];
-          const freqEnd =
-            role === "alighting" ? "alight" : role === "boarding" ? "board" : "either";
-          const freqBucket = pinFreqBucket(s, freqBuses, plan.routes, freqEnd);
-          const buses = [...new Set([...boardBuses, ...alightBuses])];
-          features.push({
-            type: "Feature",
-            properties: {
-              stopId: s.stopId,
-              name: s.name,
-              role,
-              selected: false,
-              dim: false,
-              lineStop: false,
-              endpoint: role === "alighting" ? "alight" : "",
-              outside: !s.inWalkingArea,
-              buses: buses.join(","),
-              freqBucket,
-            },
-            geometry: {
-              type: "Point",
-              coordinates: [s.lng, s.lat],
-            },
-          });
-        }
-        // Boarding on top so a nearby drop-off cannot draw a red ring around a bus pin.
-        const roleOrder: Record<string, number> = { alighting: 0, both: 1, boarding: 2 };
-        features.sort(
-          (a, b) =>
-            (roleOrder[String(a.properties.role)] ?? 1) -
-            (roleOrder[String(b.properties.role)] ?? 1),
-        );
       }
+
+      // Boarding on top so a nearby drop-off cannot draw a ring around a bus pin.
+      const roleOrder: Record<string, number> = { alighting: 0, both: 1, boarding: 2 };
+      features.sort(
+        (a, b) =>
+          (roleOrder[String(a.properties.role)] ?? 1) -
+          (roleOrder[String(b.properties.role)] ?? 1),
+      );
 
       stops.setData({ type: "FeatureCollection", features });
       const amenitySource = map.getSource("walk-amenities") as GeoJSONSource | undefined;
@@ -3224,17 +3340,19 @@ export function TransitMap({
       if (map.getLayer("stops-circle")) map.moveLayer("stops-circle");
       if (map.getLayer("stops-alight")) map.moveLayer("stops-alight");
 
-      const extraTop = browse?.bus ? 0 : 48;
+      const extraTop = 0;
       const waitingForCard = showStationPopup && popupCoverPx(map, popupRef.current) < 48;
-      if (browse?.bus && (!tripPath || suggestedWalksPending || waitingForCard)) {
+      const forceJourney = forceJourneyFitRef.current;
+      if (forceJourney) forceJourneyFitRef.current = false;
+      if (!forceJourney && browse?.bus && (!tripPath || suggestedWalksPending || waitingForCard)) {
         syncEndpointMarkers.current();
         return;
       }
-      if (!browse?.bus && waitingForCard) {
+      if (!forceJourney && !browse?.bus && waitingForCard) {
         syncEndpointMarkers.current();
         return;
       }
-      if (amenityFocusedRef.current || cameraHoldRef.current !== "auto") {
+      if (!forceJourney && (amenityFocusedRef.current || cameraHoldRef.current !== "auto")) {
         syncEndpointMarkers.current();
         return;
       }
@@ -3251,7 +3369,7 @@ export function TransitMap({
           return;
         }
         const pathKey = `${browse.bus}:line:${tripPath.tripId}:${tripPath.boardStopId}:${tripPath.alightStopId}:${toBoardRouted?.length ?? 0}:${fromAlightRouted?.length ?? 0}`;
-        if (fittedPathKey.current !== pathKey) {
+        if (forceJourney || fittedPathKey.current !== pathKey) {
           fittedPathKey.current = pathKey;
           const points = journeyFitPoints(
             origin,
@@ -3332,6 +3450,7 @@ export function TransitMap({
     walkByKey,
     recommendedBoardId,
     recommendedAlightId,
+    journeyFitNonce,
   ]);
 
   function selectBus(bus: string) {
@@ -3402,10 +3521,12 @@ export function TransitMap({
 
   function frameWholeJourney() {
     const map = mapRef.current;
-    if (!map || !tripPath) return;
     dismissAmenitySilent();
     cameraHoldRef.current = "auto";
     fittedPathKey.current = null;
+    forceJourneyFitRef.current = true;
+    setJourneyFitNonce((n) => n + 1);
+    if (!map) return;
     const boardPt = effectiveBoard
       ? { lng: effectiveBoard.lng, lat: effectiveBoard.lat }
       : null;
@@ -3420,22 +3541,29 @@ export function TransitMap({
       origin && boardPt ? walkByKey[walkPairKey(origin, boardPt)] : null;
     const fromAlightWalk =
       destination && alightPt ? walkByKey[walkPairKey(alightPt, destination)] : null;
-    const points = journeyFitPoints(origin, destination, tripPath, boardPt, alightPt, {
-      toBoard:
-        boardSuggested && toBoardWalk && !toBoardWalk.approximated
-          ? toBoardWalk.coordinates
-          : null,
-      fromAlight:
-        alightSuggested && fromAlightWalk && !fromAlightWalk.approximated
-          ? fromAlightWalk.coordinates
-          : null,
-    });
+    const points = tripPath
+      ? journeyFitPoints(origin, destination, tripPath, boardPt, alightPt, {
+          toBoard:
+            boardSuggested && toBoardWalk && !toBoardWalk.approximated
+              ? toBoardWalk.coordinates
+              : null,
+          fromAlight:
+            alightSuggested && fromAlightWalk && !fromAlightWalk.approximated
+              ? fromAlightWalk.coordinates
+              : null,
+        })
+      : [
+          ...(isValidLngLat(origin) ? [origin] : []),
+          ...(isValidLngLat(destination) ? [destination] : []),
+          ...(boardPt && isValidLngLat(boardPt) ? [boardPt] : []),
+          ...(alightPt && isValidLngLat(alightPt) ? [alightPt] : []),
+        ];
     safeFitBounds(map, points, {
       maxZoom: 14,
       minZoom: 11,
       duration: 550,
       keepBottom: true,
-      padding: FIT_INSET,
+      padding: cameraPaddingForCard(map, popupRef.current, true, 0),
     });
   }
 
@@ -3594,11 +3722,14 @@ export function TransitMap({
           className={`bus-popup${lineSelected ? "" : " compact"}`}
           role="dialog"
           aria-label={lineSelected ? "Selected bus" : "Buses at this station"}
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
         >
           <div className="bus-popup-toolbar">
             <div className="bus-popup-buses">
               {orderedBuses.map((bus) => {
-                const known = busFrequencyKnown.get(bus) === true;
+                const bucket = busFrequency.get(bus) ?? "unknown";
+                const known = bucket !== "unknown" && bucket !== "none";
                 const active = bus === browse.bus;
                 return (
                   <button
@@ -3607,7 +3738,7 @@ export function TransitMap({
                     className={[
                       "popup-bus",
                       active ? "active" : "",
-                      known ? "" : "unknown-freq",
+                      known ? "" : bucket === "none" ? "no-freq" : "unknown-freq",
                     ]
                       .filter(Boolean)
                       .join(" ")}
@@ -3636,12 +3767,14 @@ export function TransitMap({
               <div className="popup-headway">
               <p
                 className={
-                  lineHeadwaySeconds != null && lineHeadwaySeconds > 0
-                    ? "popup-freq"
-                    : "popup-freq unknown"
+                  lineFrequencyBucket === "none"
+                    ? "popup-freq no-freq"
+                    : lineHeadwaySeconds != null && lineHeadwaySeconds > 0
+                      ? "popup-freq"
+                      : "popup-freq unknown"
                 }
               >
-                {formatHeadway(lineHeadwaySeconds)}
+                {formatHeadway(lineHeadwaySeconds, lineFrequencyBucket)}
               </p>
               <p className="popup-next">
                 <span>
@@ -3703,16 +3836,67 @@ export function TransitMap({
               </div>
               <button
                 type="button"
-                className="view-all-stops"
-                disabled={!tripPath}
-                onClick={frameWholeJourney}
+                className={`view-all-stations${showAllStations ? " active" : ""}`}
+                aria-pressed={showAllStations}
+                aria-expanded={showAllStations}
+                disabled={!tripPath?.stops.length}
+                onClick={() => setShowAllStations((open) => !open)}
               >
-                View all stops
+                {showAllStations ? "Hide stations" : "View all stations"}
               </button>
 
-              {pathLoading ? (
+              {showAllStations ? (
+                <div className="line-stations-sheet" role="region" aria-label="All stations on this line">
+                  {pathLoading && !tripPath ? (
+                    <p className="popup-muted">Loading path…</p>
+                  ) : !tripPath?.stops.length ? (
+                    <p className="popup-muted">No stations on this line.</p>
+                  ) : (
+                    <ol className="line-stations-list" ref={allStationsListRef}>
+                      {tripPath.stops.map((stop, i) => {
+                        const next = tripPath.stops[i + 1];
+                        const gap = next ? formatStopGap(stop, next) : null;
+                        const isBoard = i === lineStationRide.boardIdx;
+                        const isAlight = i === lineStationRide.alightIdx;
+                        const lo = Math.min(lineStationRide.boardIdx, lineStationRide.alightIdx);
+                        const hi = Math.max(lineStationRide.boardIdx, lineStationRide.alightIdx);
+                        const onRide =
+                          lineStationRide.boardIdx >= 0 &&
+                          lineStationRide.alightIdx >= 0 &&
+                          i >= lo &&
+                          i <= hi;
+                        return (
+                          <li
+                            key={`${stop.stopSequence}-${stop.stopId}`}
+                            className={[
+                              onRide ? "on-ride" : "off-ride",
+                              isBoard ? "is-board" : "",
+                              isAlight ? "is-alight" : "",
+                            ]
+                              .filter(Boolean)
+                              .join(" ")}
+                          >
+                            <div className="line-station-row">
+                              <time>
+                                {formatStopClock({ ...stop, isBoard }) ?? "—"}
+                              </time>
+                              <span className="line-station-name">{stop.name}</span>
+                              {isBoard ? <em>Get on</em> : null}
+                              {isAlight ? <em>Get off</em> : null}
+                            </div>
+                            {gap ? <p className="line-station-gap">{gap}</p> : null}
+                          </li>
+                        );
+                      })}
+                    </ol>
+                  )}
+                </div>
+              ) : null}
+
+              {pathLoading && !showAllStations ? (
                 <p className="popup-muted">Loading path…</p>
               ) : null}
+              {!showAllStations ? (
               <div className="bus-popup-nav">
                 <button
                   type="button"
@@ -3742,10 +3926,8 @@ export function TransitMap({
                       if (linePositionLabel) parts.push(linePositionLabel);
                       if (clock) parts.push(clock);
                       const isRecommended =
-                        currentStation.stopId ===
-                        (browse.scrollEnd === "alight"
-                          ? recommendedAlightId
-                          : recommendedBoardId);
+                        currentStation.stopId === recommendedAlightId ||
+                        currentStation.stopId === recommendedBoardId;
                       if (isRecommended) parts.push("Recommended");
                       return parts.length ? parts.join(" · ") : "On this line";
                     })()}
@@ -3765,6 +3947,7 @@ export function TransitMap({
                   →
                 </button>
               </div>
+              ) : null}
               {walkSummary ? (
                 <div className="walk-summary" aria-label="Trip time summary">
                   {walkSummary.walkToBoard != null ? (
@@ -3817,12 +4000,14 @@ export function TransitMap({
               </div>
               <p
                 className={
-                  stopHeadwaySeconds != null && stopHeadwaySeconds > 0
-                    ? "popup-freq"
-                    : "popup-freq unknown"
+                  currentStation.frequencyBucket === "none"
+                    ? "popup-freq no-freq"
+                    : stopHeadwaySeconds != null && stopHeadwaySeconds > 0
+                      ? "popup-freq"
+                      : "popup-freq unknown"
                 }
               >
-                {formatHeadway(stopHeadwaySeconds)}
+                {formatHeadway(stopHeadwaySeconds, currentStation.frequencyBucket)}
               </p>
               <p className="popup-muted">Select a line to see its path and frequency</p>
             </>

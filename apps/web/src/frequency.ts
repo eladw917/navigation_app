@@ -1,10 +1,26 @@
 /** Shared frequency display helpers (mirrors API bucketing). */
 
-export type FrequencyBucket = "under_5" | "about_10" | "about_20" | "over_30" | "unknown";
+export type FrequencyBucket =
+  | "under_5"
+  | "about_10"
+  | "about_20"
+  | "over_30"
+  | "unknown"
+  | "none";
 
-export function headwayToBucket(headwaySeconds: number | null | undefined): FrequencyBucket {
+/** Boarding pin radius matching the get-off disc. */
+export const DEFAULT_PIN_RADIUS = 11;
+
+/**
+ * @param emptyWindow true when we successfully counted 0 departures in the hour
+ * (as opposed to missing / failed stats).
+ */
+export function headwayToBucket(
+  headwaySeconds: number | null | undefined,
+  emptyWindow = false,
+): FrequencyBucket {
   if (headwaySeconds == null || !Number.isFinite(headwaySeconds) || headwaySeconds <= 0) {
-    return "unknown";
+    return emptyWindow ? "none" : "unknown";
   }
   const minutes = headwaySeconds / 60;
   if (minutes < 5) return "under_5";
@@ -27,7 +43,28 @@ export function stationHeadwayFromLines(
   return Math.min(...known);
 }
 
-export function formatHeadway(headwaySeconds: number | null | undefined): string {
+/** Best pin/chip bucket for a station: known headway wins, else all-none, else unknown. */
+export function stationFrequencyBucket(
+  lines: Array<
+    | { headwaySeconds?: number | null; frequencyBucket?: FrequencyBucket }
+    | null
+    | undefined
+  >,
+): FrequencyBucket {
+  const headway = stationHeadwayFromLines(lines);
+  if (headway != null) return headwayToBucket(headway);
+  const buckets = lines
+    .map((l) => l?.frequencyBucket)
+    .filter((b): b is FrequencyBucket => b != null);
+  if (buckets.length > 0 && buckets.every((b) => b === "none")) return "none";
+  return "unknown";
+}
+
+export function formatHeadway(
+  headwaySeconds: number | null | undefined,
+  bucket?: FrequencyBucket,
+): string {
+  if (bucket === "none") return "No buses in the next hour";
   if (headwaySeconds == null || !Number.isFinite(headwaySeconds) || headwaySeconds <= 0) {
     return "Frequency unknown";
   }
@@ -41,14 +78,15 @@ export function formatHeadway(headwaySeconds: number | null | undefined): string
 export function bucketRadius(bucket: FrequencyBucket | string | undefined): number {
   switch (bucket) {
     case "under_5":
-      return 11;
+      return 16;
     case "about_10":
-      return 9;
+      return 14;
     case "about_20":
-      return 7;
+      return 12;
     case "over_30":
-      return 5;
+    case "unknown":
+    case "none":
     default:
-      return 6;
+      return DEFAULT_PIN_RADIUS;
   }
 }

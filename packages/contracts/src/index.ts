@@ -42,6 +42,7 @@ export const FrequencyBucketSchema = z.enum([
   "about_20",
   "over_30",
   "unknown",
+  "none",
 ]);
 export type FrequencyBucket = z.infer<typeof FrequencyBucketSchema>;
 

@@ -1890,24 +1890,105 @@ input {
   border-color: rgb(15 23 42 / 22%);
 }
 
-.view-all-stops {
+.view-all-stations {
   display: block;
   width: 100%;
-  margin: 0 0 0.3rem;
-  padding: 0.28rem 0.5rem;
-  border: 1px solid rgb(15 23 42 / 12%);
+  margin: 0 0 0.35rem;
+  padding: 0.32rem 0.55rem;
+  border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  background: var(--page);
-  color: var(--ink);
+  background: #fff;
   font: inherit;
   font-size: var(--text-sm);
-  font-weight: 700;
+  font-weight: 650;
+  color: var(--ink);
   cursor: pointer;
 }
 
-.view-all-stops:disabled {
+.view-all-stations:hover:not(:disabled) {
+  border-color: var(--ink);
+}
+
+.view-all-stations.active {
+  border-color: rgb(15 23 42 / 22%);
+  background: rgb(15 23 42 / 6%);
+}
+
+.view-all-stations:disabled {
   opacity: 0.5;
-  cursor: default;
+  cursor: not-allowed;
+}
+
+.line-stations-sheet {
+  margin: 0 0 0.35rem;
+}
+
+.line-stations-list {
+  list-style: none;
+  margin: 0;
+  padding: 0.15rem 0;
+  max-height: min(42vh, 18rem);
+  overflow: auto;
+}
+
+.line-stations-list li {
+  margin: 0;
+}
+
+.line-station-row {
+  display: grid;
+  grid-template-columns: 3.2rem 1fr auto;
+  gap: 0.4rem;
+  align-items: baseline;
+  padding: 0.22rem 0.35rem;
+  border-radius: 6px;
+  font-size: var(--text-sm);
+}
+
+.line-stations-list li.off-ride .line-station-row {
+  opacity: 0.45;
+}
+
+.line-stations-list li.is-board .line-station-row {
+  background: var(--origin-bg);
+  font-weight: 600;
+}
+
+.line-stations-list li.is-alight .line-station-row {
+  background: var(--destination-bg);
+  font-weight: 600;
+}
+
+.line-station-row time {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.line-station-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.line-station-row em {
+  font-style: normal;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--origin);
+}
+
+.line-stations-list li.is-alight em {
+  color: var(--destination);
+}
+
+.line-station-gap {
+  margin: 0;
+  padding: 0 0.35rem 0.1rem 3.6rem;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--muted);
 }
 
 .popup-end em {
@@ -2081,6 +2162,11 @@ input {
   font-weight: 500;
 }
 
+.popup-freq.no-freq {
+  color: #64748b;
+  font-weight: 500;
+}
+
 .bus-popup-alight {
   margin: 0.55rem 0 0;
   text-align: center;
@@ -2225,8 +2311,8 @@ input {
 
 .endpoint-marker {
   position: relative;
-  width: 18px;
-  height: 18px;
+  width: 28px;
+  height: 28px;
   pointer-events: none;
   z-index: 1;
   overflow: visible;
@@ -2236,10 +2322,10 @@ input {
   position: absolute;
   left: 50%;
   /* Lift so the rotated diamond tip sits on the geographic anchor (bottom center). */
-  bottom: 3px;
-  width: 14px;
-  height: 14px;
-  margin-left: -7px;
+  bottom: 4px;
+  width: 22px;
+  height: 22px;
+  margin-left: -11px;
   border-radius: 50% 50% 50% 0;
   transform: rotate(-45deg);
   transform-origin: center center;
@@ -2372,6 +2458,20 @@ button.popup-bus.unknown-freq {
 button.popup-bus.unknown-freq.active {
   background: var(--ink);
   color: #fff;
+  border-color: var(--ink);
+}
+
+button.popup-bus.no-freq {
+  background: #fff;
+  color: var(--muted);
+  border-style: dashed;
+  border-color: #94a3b8;
+}
+
+button.popup-bus.no-freq.active {
+  background: var(--ink);
+  color: #fff;
+  border-style: solid;
   border-color: var(--ink);
 }
 
